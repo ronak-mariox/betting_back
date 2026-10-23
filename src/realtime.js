@@ -1,5 +1,5 @@
 const { Server } = require('socket.io');
-const env = require('./config/env');
+const { corsOrigin } = require('./config/cors');
 const User = require('./models/User');
 const { verifyAccessToken } = require('./services/token.service');
 
@@ -32,7 +32,7 @@ function coalesce(key, ms, fire) {
 
 function init(httpServer) {
   io = new Server(httpServer, {
-    cors: { origin: env.corsOrigins, credentials: true },
+    cors: { origin: corsOrigin, credentials: true },
     // Phones on mobile data drop and rejoin often; keep the heartbeat short.
     pingInterval: 20000,
     pingTimeout: 20000,

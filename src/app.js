@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const env = require('./config/env');
+const { corsOrigin } = require('./config/cors');
 const routes = require('./routes');
 const { notFound, errorHandler } = require('./middleware/errorHandler');
 
@@ -15,7 +15,7 @@ app.get('/health', (_req, res) => {
 app.use(helmet());
 app.use(
   cors({
-    origin: env.corsOrigins,
+    origin: corsOrigin,
     credentials: true,
   }),
 );
