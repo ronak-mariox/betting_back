@@ -118,4 +118,49 @@ const walletFlowSeries = async () => {
   });
 };
 
-module.exports = { seriesFor, getHighlights, walletFlowSeries };
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Analytics headline cards: the last 30 days against the 30 days before.
+ * Revenue is the house's betting P&L (−Σ Bet Win/Loss), volume excludes
+ * voided stakes, and "active" means a player signed in within the window.
+ */
+const getGrowth = async () => {
+  const now = Date.now();
+  const windows = [
+    { $gte: new Date(now - 30 * DAY_MS), $lt: new Date(now) },
+    { $gte: new Date(now - 60 * DAY_MS), $lt: new Date(now - 30 * DAY_MS) },
+  ];
+  const revenue = (createdAt) =>
+    Transaction.aggregate([
+      { $match: { createdAt, type: { $in: ['Bet Win', 'Bet Loss'] }, status: 'Completed' } },
+      { $group: { _id: null, total: { $sum: { $multiply: ['$amount', -1] } } } },
+    ]).then((rows) => rows[0]?.total || 0);
+  const volume = (createdAt) =>
+    Bet.aggregate([
+      { $match: { createdAt, status: { $ne: 'Void' } } },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]).then((rows) => rows[0]?.total || 0);
+  const newPlayers = (createdAt) => User.countDocuments({ role: 'player', createdAt });
+
+  const [revNow, revPrev, volNow, volPrev, playersNow, playersPrev, activePlayers, totalPlayers] = await Promise.all([
+    revenue(windows[0]),
+    revenue(windows[1]),
+    volume(windows[0]),
+    volume(windows[1]),
+    newPlayers(windows[0]),
+    newPlayers(windows[1]),
+    User.countDocuments({ role: 'player', lastLoginAt: { $gte: windows[0].$gte } }),
+    User.countDocuments({ role: 'player' }),
+  ]);
+
+  return {
+    revenue: { current: revNow, previous: revPrev },
+    betVolume: { current: volNow, previous: volPrev },
+    newPlayers: { current: playersNow, previous: playersPrev },
+    activePlayers,
+    totalPlayers,
+  };
+};
+
+module.exports = { seriesFor, getHighlights, walletFlowSeries, getGrowth };

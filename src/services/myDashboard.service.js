@@ -4,26 +4,21 @@ const Bet = require('../models/Bet');
 const Transaction = require('../models/Transaction');
 const WalletRequest = require('../models/WalletRequest');
 const AuditLog = require('../models/AuditLog');
-const KycSubmission = require('../models/KycSubmission');
-const Settings = require('../models/Settings');
+const Commission = require('../models/Commission');
 const { loadTree, descendants } = require('./tree.service');
 
-const DAY_MS = 24 * 60 * 60 * 1000;
 const FEED_LIMIT = 6;
 
-const startOfDay = (offsetDays = 0) => {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return new Date(d.getTime() + offsetDays * DAY_MS);
-};
+/** Midnight `offsetDays` from today in the platform's timezone (Settings → General). */
+const { startOfDay, dayKey: platformDayKey, timezone } = require('../utils/time');
+const { money } = require('../utils/money');
 
 const sumBy = (rows, key) => rows.reduce((total, row) => total + (row[key] || 0), 0);
 
 /**
  * "My" dashboard for a staff account (the Agent dashboard screen): every
- * figure covers only the caller's own players. Commission is estimated as
- * stake × the caller's commission rate (own rate, else the Settings default
- * for its role) — the settled figure lives in the Commission ledger.
+ * figure covers only the caller's own players. Commission is what the caller
+ * was actually paid at the end of each match (the Commission ledger).
  */
 /**
  * How each agent under the caller is doing today: its users, today's bets and
@@ -43,7 +38,7 @@ async function agentBreakdown(tree, downline, today) {
   const playerIds = [...agentOf.keys()].map((id) => new mongoose.Types.ObjectId(id));
 
   const [accounts, todayBets, openBets, pending] = await Promise.all([
-    User.find({ _id: { $in: agentIds } }, 'name username status commissionRate walletBalance').lean(),
+    User.find({ _id: { $in: agentIds } }, 'name username status walletBalance').lean(),
     Bet.aggregate([
       { $match: { user: { $in: playerIds }, createdAt: { $gte: today }, status: { $ne: 'Void' } } },
       { $group: { _id: '$user', bets: { $sum: 1 }, stake: { $sum: '$amount' } } },
@@ -135,15 +130,24 @@ async function getMyDashboard(actor) {
   const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
   const lastMonthStart = new Date(today.getFullYear(), today.getMonth() - 1, 1);
 
-  const [players, settings, betDays, activeToday, activeYesterday, revenueAgg, pending, recentBets, recentTxns, recentRequests, audits, recentKyc] =
+  const [players, earnedDays, betDays, activeToday, activeYesterday, revenueAgg, pending, recentBets, recentTxns, recentRequests, audits] =
     await Promise.all([
-      User.find({ _id: { $in: playerIds } }, 'status kyc createdAt').lean(),
-      Settings.findById('main').lean(),
+      User.find({ _id: { $in: playerIds } }, 'status createdAt').lean(),
+      // Commission this account was paid, per day (match-end payouts).
+      Commission.aggregate([
+        { $match: { entity: actor._id, event: { $ne: null }, settledAt: { $gte: weekStart } } },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$settledAt', timezone: timezone() } },
+            commission: { $sum: '$commission' },
+          },
+        },
+      ]),
       Bet.aggregate([
         { $match: { user: { $in: playerIds }, createdAt: { $gte: weekStart }, status: { $ne: 'Void' } } },
         {
           $group: {
-            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: 'Asia/Kolkata' } },
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: timezone() } },
             bets: { $sum: 1 },
             stake: { $sum: '$amount' },
           },
@@ -175,19 +179,14 @@ async function getMyDashboard(actor) {
         .populate('target', 'name username')
         .sort({ createdAt: -1 })
         .limit(FEED_LIMIT),
-      KycSubmission.find({ user: { $in: playerIds } }, 'user fullName documentType status createdAt reviewedAt')
-        .populate('user', 'name username')
-        .sort({ updatedAt: -1 })
-        .limit(FEED_LIMIT)
-        .lean(),
     ]);
 
   const agents = await agentBreakdown(tree, downline, today);
   const superAgents = await superAgentBreakdown(tree, downline, agents);
 
-  const rate = actor.commissionRate ?? (Number(settings?.commissionRates?.[actor.role]) || 0);
-  const dayKey = (date) => date.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const dayKey = (date) => platformDayKey(date);
   const dayStats = (date) => betDays.find((row) => row._id === dayKey(date)) || { bets: 0, stake: 0 };
+  const earnedOn = (date) => Math.round((earnedDays.find((row) => row._id === dayKey(date))?.commission || 0) * 100) / 100;
   const todayStats = dayStats(today);
   const yesterdayStats = dayStats(yesterday);
   const revenueOf = (key) => revenueAgg.find((row) => row._id === key)?.revenue || 0;
@@ -202,7 +201,7 @@ async function getMyDashboard(actor) {
     commissionWeek.push({
       date: dayKey(date),
       stake: dayStats(date).stake,
-      commission: Math.round((dayStats(date).stake * rate) / 100),
+      commission: earnedOn(date),
     });
   }
 
@@ -216,12 +215,12 @@ async function getMyDashboard(actor) {
   const activity = [
     ...recentBets.map((bet) => ({
       kind: 'bet',
-      description: `${name(bet.user)} placed a bet of ₹${bet.amount.toLocaleString('en-IN')}${bet.event?.name ? ` on ${bet.event.name}` : ''}`,
+      description: `${name(bet.user)} placed a bet of ${money(bet.amount)}${bet.event?.name ? ` on ${bet.event.name}` : ''}`,
       at: bet.createdAt,
     })),
     ...recentRequests.map((request) => ({
       kind: request.kind,
-      description: `${name(request.user)} ${request.kind} ₹${request.amount.toLocaleString('en-IN')} — ${request.status}`,
+      description: `${name(request.user)} ${request.kind} ${money(request.amount)} — ${request.status}`,
       at: request.updatedAt,
     })),
     ...audits.map((entry) => ({
@@ -237,13 +236,6 @@ async function getMyDashboard(actor) {
       }`,
       at: entry.createdAt,
     })),
-    // A submission is one event; its review (Verified / Rejected) is a second, later one.
-    ...recentKyc.flatMap((kyc) => [
-      { kind: 'kyc', description: `${name(kyc.user)} submitted KYC (${kyc.documentType}) — waiting for review`, at: kyc.createdAt },
-      ...(kyc.reviewedAt && kyc.status !== 'Pending'
-        ? [{ kind: 'kyc', description: `${name(kyc.user)} KYC ${kyc.status.toLowerCase()}`, at: kyc.reviewedAt }]
-        : []),
-    ]),
   ]
     .sort((a, b) => new Date(b.at) - new Date(a.at))
     .slice(0, FEED_LIMIT);
@@ -280,7 +272,8 @@ async function getMyDashboard(actor) {
     /** One row per super agent — only a franchise has any. */
     superAgents,
     referralCode: actor.referralCode || null,
-    commissionRate: rate,
+    /** Rates this account receives from its upline, in percent. */
+    commissionRates: { match: actor.matchCommission || 0, session: actor.sessionCommission || 0 },
     stats: {
       totalUsers: players.length,
       activeToday: activeToday.length,
@@ -289,8 +282,8 @@ async function getMyDashboard(actor) {
       todayBets: todayStats.bets,
       yesterdayBets: yesterdayStats.bets,
       todayStake: todayStats.stake,
-      todayCommission: Math.round((todayStats.stake * rate) / 100),
-      yesterdayCommission: Math.round((yesterdayStats.stake * rate) / 100),
+      todayCommission: earnedOn(today),
+      yesterdayCommission: earnedOn(yesterday),
       todayRevenue: revenueOf('today'),
       yesterdayRevenue: revenueOf('yesterday'),
       pendingDeposits: pendingOf('deposit'),
@@ -299,8 +292,6 @@ async function getMyDashboard(actor) {
     overview: {
       totalUsers: players.length,
       activeToday: activeToday.length,
-      kycVerified: players.filter((p) => p.kyc === 'Verified').length,
-      kycPending: players.filter((p) => p.kyc === 'Pending').length,
       suspended: players.filter((p) => p.status === 'suspended').length,
       newThisMonth,
       newLastMonth,

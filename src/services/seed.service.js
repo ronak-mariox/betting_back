@@ -11,7 +11,6 @@ const Partner = require('../models/Partner');
 const CmsContent = require('../models/CmsContent');
 const Notification = require('../models/Notification');
 const Ticket = require('../models/Ticket');
-const KycSubmission = require('../models/KycSubmission');
 const Settings = require('../models/Settings');
 const { hashPassword } = require('./password.service');
 const { generateReferralCode } = require('./account.service');
@@ -19,25 +18,22 @@ const { generateReferralCode } = require('./account.service');
 /** Every demo player logs in with this password (app login). */
 const DEMO_PLAYER_PASSWORD = 'player@123';
 
-/** A 1×1 PNG, standing in for the KYC document photos of the demo players. */
-const DEMO_DOC = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-
 const hoursFromNow = (h) => new Date(Date.now() + h * 60 * 60 * 1000);
 
 /**
- * Three players under agent01, one per KYC state, with balances that equal
- * the sum of their ledger rows:
- *   demo_rahul  Not Submitted   5,000 deposit + 500 bet win   = 5,500
- *   demo_priya  Pending review  20,000 deposit                = 20,000
- *   demo_amit   Verified        15,000 deposit − 1,000 loss    = 14,000
+ * Three players under agent01, with balances that equal the sum of their
+ * ledger rows:
+ *   demo_rahul  5,000 deposit + 500 bet win   = 5,500
+ *   demo_priya  20,000 deposit                = 20,000
+ *   demo_amit   15,000 deposit − 1,000 loss    = 14,000
  */
 const DEMO_PLAYERS = [
-  { username: 'demo_rahul', name: 'Rahul Verma', city: 'Noida', state: 'Uttar Pradesh', kyc: 'Not Submitted', deposit: 5000 },
-  { username: 'demo_priya', name: 'Priya Sharma', city: 'Pune', state: 'Maharashtra', kyc: 'Pending', deposit: 20000 },
-  { username: 'demo_amit', name: 'Amit Kumar', city: 'Delhi', state: 'Delhi', kyc: 'Verified', deposit: 15000 },
+  { username: 'demo_rahul', name: 'Rahul Verma', city: 'Noida', state: 'Uttar Pradesh', deposit: 5000 },
+  { username: 'demo_priya', name: 'Priya Sharma', city: 'Pune', state: 'Maharashtra', deposit: 20000 },
+  { username: 'demo_amit', name: 'Amit Kumar', city: 'Delhi', state: 'Delhi', deposit: 15000 },
 ];
 
-async function seedPlayers(agent, reviewer) {
+async function seedPlayers(agent) {
   const passwordHash = await hashPassword(DEMO_PLAYER_PASSWORD);
   const players = {};
   for (const demo of DEMO_PLAYERS) {
@@ -52,7 +48,6 @@ async function seedPlayers(agent, reviewer) {
       city: demo.city,
       state: demo.state,
       phone: '',
-      kyc: demo.kyc,
       // eslint-disable-next-line no-await-in-loop
       referralCode: await generateReferralCode(demo.username),
       walletBalance: demo.deposit,
@@ -70,28 +65,6 @@ async function seedPlayers(agent, reviewer) {
       note: 'Opening deposit',
       createdBy: agent._id,
     });
-
-    if (demo.kyc !== 'Not Submitted') {
-      // eslint-disable-next-line no-await-in-loop
-      await KycSubmission.create({
-        user: user._id,
-        referenceId: `KYCDEMO${demo.username.slice(5, 7).toUpperCase()}`,
-        fullName: demo.name,
-        phone: demo.kyc === 'Verified' ? '9876543210' : '9123456780',
-        dob: new Date('1996-04-12'),
-        address: 'Demo Street 12',
-        city: demo.city,
-        state: demo.state,
-        country: 'India',
-        postalCode: '201301',
-        documentType: demo.kyc === 'Verified' ? 'PAN Card' : 'Aadhaar Card',
-        documentNumber: demo.kyc === 'Verified' ? 'ABCDE1234F' : '123412341234',
-        front: { name: 'front_side_doc.png', mime: 'image/png', data: DEMO_DOC },
-        back: { name: 'back_side_doc.png', mime: 'image/png', data: DEMO_DOC },
-        status: demo.kyc,
-        ...(demo.kyc === 'Verified' ? { reviewedBy: reviewer._id, reviewedAt: new Date() } : {}),
-      });
-    }
   }
   return players;
 }
@@ -155,7 +128,6 @@ async function seedBook(players) {
   });
 
   await Notification.create([
-    { title: 'New KYC submission', body: 'Priya Sharma (demo_priya) submitted Aadhaar Card for review', category: 'general', emoji: '🪪' },
     { title: 'Withdrawal pending review', body: '₹3,000 withdrawal from demo_amit awaiting approval', category: 'wallet', emoji: '💰' },
   ]);
 }
@@ -233,23 +205,15 @@ async function withDemoSeedLock(fn, { wait = false } = {}) {
 async function seedDemoBook() {
   if (await User.exists({ role: 'player' })) return;
 
-  // No players exist, so any KYC row is an orphan from a deleted player —
-  // clear the demo ones so their fixed reference IDs don't collide.
-  await KycSubmission.deleteMany({ referenceId: /^KYCDEMO/ });
-
   const [agent, superAgent] = await Promise.all([
     User.findOne({ username: 'agent01' }),
     User.findOne({ username: 'superagent01' }),
   ]);
   if (!agent || !superAgent) return;
 
-  const players = await seedPlayers(agent, superAgent);
+  const players = await seedPlayers(agent);
   await seedBook(players);
   await seedPlatform();
-
-  // Commission rows come from the seeded bets, exactly as the panel's Recompute does.
-  // eslint-disable-next-line global-require
-  await require('./commission.service').recompute();
 
   await Settings.findByIdAndUpdate(
     'main',
@@ -260,7 +224,8 @@ async function seedDemoBook() {
         walletRules: { minDeposit: 500, maxDeposit: 500000, minWithdrawal: 500, maxWithdrawal: 200000 },
         bettingLimits: { minBet: 100, maxBet: 100000 },
         exposureLimits: { maxMarketExposure: 500000, maxUserExposure: 100000 },
-        commissionRates: { franchise: 5, 'super-agent': 4, agent: 3 },
+        // Only the referral bonus lives here; session / match commission is set per account.
+        commissionRates: { referral: 0 },
         smtp: { host: '', port: 587, user: '' },
         sms: { provider: '', senderId: '' },
         brand: { primaryColor: '#0F172A', logoUrl: '' },

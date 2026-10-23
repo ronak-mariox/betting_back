@@ -6,7 +6,7 @@ const { Schema } = mongoose;
  * A minimal security audit trail for auth/authorization events only — the
  * kind of rows the web panel's Security > Logs/Audit tabs render (login,
  * login failures, account provisioning, suspensions, permission edits).
- * Reviews (KYC, deposit / withdrawal requests) are logged too, so both the
+ * Reviews (deposit / withdrawal requests) are logged too, so both the
  * reviewer's and the user's activity show who decided what. Bets and ledger
  * rows belong to their own modules.
  */
@@ -30,6 +30,7 @@ const auditLogSchema = new Schema(
         'password_changed',
         'password_reset_requested',
         'password_reset',
+        'bet_voided',
         'account_created',
         'account_updated',
         'account_suspended',
@@ -37,9 +38,6 @@ const auditLogSchema = new Schema(
         'permission_updated',
         'session_revoked',
         // Reviews staff make on their users — shown in the reviewer's and the user's activity.
-        'kyc_submitted',
-        'kyc_verified',
-        'kyc_rejected',
         'deposit_approved',
         'deposit_rejected',
         'withdrawal_approved',

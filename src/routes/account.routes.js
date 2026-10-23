@@ -3,20 +3,23 @@ const { Router } = require('express');
 const { body, param, query } = require('express-validator');
 const accountController = require('../controllers/account.controller');
 const validate = require('../middleware/validate');
-const { authenticate, requireOwnSubtree } = require('../middleware/auth');
-const { ROLE_ORDER } = require('../constants/roles');
-const { COMMISSION_TYPES, SETTLEMENT_CYCLES, KYC_STATUSES } = require('../constants/admin');
+const { authenticate, authorize, requireOwnSubtree } = require('../middleware/auth');
+const { grant } = require('../services/scope.service');
 
+/** Listing / opening accounts: staff only, and only with "User List" (view). */
+const userList = [
+  authorize('super-admin', 'franchise', 'super-agent', 'agent'),
+  grant('userManagement', 'userList', 'V', 'You do not have permission to view users'),
+];
+const { ROLE_ORDER } = require('../constants/roles');
 const STAFF_FIELD_RULES = [
   body('businessName').optional().isString().trim().isLength({ max: 80 }),
-  body('creditLimit').optional().isFloat({ min: 0 }).toFloat(),
-  body('commissionRate').optional({ nullable: true }).isFloat({ min: 0, max: 100 }).toFloat(),
-  body('commissionType').optional().isIn(COMMISSION_TYPES),
   body('bettingLimit').optional().isFloat({ min: 0 }).toFloat(),
   body('maxExposure').optional().isFloat({ min: 0 }).toFloat(),
-  body('settlementCycle').optional().isIn(SETTLEMENT_CYCLES),
-  ...['shareHolding', 'matchCommission', 'myMatchCommission', 'sessionCommission', 'mySessionCommission'].map((field) =>
-    body(field).optional({ nullable: true }).isFloat({ min: 0, max: 100 }).toFloat(),
+  body('shareHolding').optional({ nullable: true }).isFloat({ min: 0, max: 100 }).toFloat(),
+  // Session / match commission received from the upline — players and staff alike.
+  ...['matchCommission', 'sessionCommission'].map((field) =>
+    body(field).optional({ nullable: true }).isFloat({ min: 0, max: 100 }).withMessage('Commission must be 0–100%').toFloat(),
   ),
 ];
 
@@ -32,6 +35,7 @@ router.get(
     query('limit').optional().isInt({ min: 1, max: 100 }),
   ],
   validate,
+  ...userList,
   accountController.list,
 );
 
@@ -52,7 +56,6 @@ router.post(
     body('name').optional().isString().trim().isLength({ max: 80 }),
     body('email').optional({ checkFalsy: true }).isEmail().withMessage('Enter a valid email address'),
     phoneRule(),
-    body('kyc').optional({ checkFalsy: true }).isIn(KYC_STATUSES),
     body('dob').optional({ checkFalsy: true }).isISO8601(),
     ...STAFF_FIELD_RULES,
   ],
@@ -60,7 +63,7 @@ router.post(
   accountController.create,
 );
 
-router.get('/:id', [param('id').isMongoId()], validate, requireOwnSubtree('id'), accountController.getOne);
+router.get('/:id', [param('id').isMongoId()], validate, ...userList, requireOwnSubtree('id'), accountController.getOne);
 
 router.patch(
   '/:id',
@@ -72,8 +75,6 @@ router.patch(
     body('city').optional().isString().trim().isLength({ max: 60 }),
     body('state').optional().isString().trim().isLength({ max: 60 }),
     body('dob').optional({ checkFalsy: true }).isISO8601(),
-    body('kyc').optional().isIn(KYC_STATUSES),
-    body('kycRejectionReason').optional().isString().trim().isLength({ max: 200 }),
     ...STAFF_FIELD_RULES,
   ],
   validate,

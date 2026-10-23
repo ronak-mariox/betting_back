@@ -40,9 +40,7 @@ const PERMISSION_GROUPS = [
       { key: 'userList', name: 'User List', description: 'View list of all users', grants: { superAgent: 'EV', agent: 'EV', franchise: 'EV' } },
       { key: 'createUser', name: 'Create User', description: 'Add new users to the platform', grants: { superAgent: 'EVX', agent: 'EVX', franchise: '' } },
       { key: 'editUser', name: 'Edit User', description: 'Modify user profile & details', grants: { superAgent: 'EVX', agent: '', franchise: '' } },
-      { key: 'suspendUser', name: 'Suspend User', description: 'Suspend or activate user accounts', grants: { superAgent: '', agent: '', franchise: '' } },
-      { key: 'kycDetails', name: 'KYC Details', description: 'View user KYC documents', grants: { superAgent: 'EV', agent: '', franchise: '' } },
-    ],
+      { key: 'suspendUser', name: 'Suspend User', description: 'Suspend or activate user accounts', grants: { superAgent: '', agent: '', franchise: '' } },    ],
   },
   {
     key: 'bettingMarkets',

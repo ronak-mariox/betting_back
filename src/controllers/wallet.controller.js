@@ -9,14 +9,32 @@ const stats = asyncHandler(async (req, res) => {
   res.json({ stats: await walletService.getStats(await scopeFor(req.user)) });
 });
 
+/** Which request kinds the actor may see: "Deposit" / "Withdrawal" (view) on the Permissions page. */
+async function visibleKinds(user) {
+  // eslint-disable-next-line global-require
+  const can = await require('../services/permission.service').checkerFor(user.role);
+  return ['deposit', 'withdrawal'].filter((kind) => can('finance', kind, 'V'));
+}
+
 const requestProof = asyncHandler(async (req, res) => {
+  const request = await WalletRequest.findById(req.params.id).select('kind');
+  if (request && !(await visibleKinds(req.user)).includes(request.kind)) {
+    throw ApiError.forbidden(`You do not have permission to view ${request.kind}s`);
+  }
   const proof = await walletService.getRequestProof({ requestId: req.params.id, scope: await scopeFor(req.user) });
   res.json({ proof });
 });
 
 const listRequests = asyncHandler(async (req, res) => {
-  const result = await walletService.listRequests({ ...req.query, scope: await scopeFor(req.user) });
-  res.json(result);
+  const kinds = await visibleKinds(req.user);
+  if (req.query.kind && !kinds.includes(req.query.kind)) {
+    throw ApiError.forbidden(`You do not have permission to view ${req.query.kind}s`);
+  }
+  if (!kinds.length) return res.json({ items: [], total: 0, page: 1, limit: Number(req.query.limit) || 0 });
+  // No kind asked: only the kinds this role may see.
+  const kind = req.query.kind || (kinds.length === 1 ? kinds[0] : undefined);
+  const result = await walletService.listRequests({ ...req.query, kind, scope: await scopeFor(req.user) });
+  return res.json(result);
 });
 
 /** Approving/rejecting needs the Deposit or Withdrawal grant matching the request. */

@@ -23,12 +23,21 @@ const listMatches = async ({ tab }) => {
     return acc;
   }, {});
 
-  return events.map((event) => ({ ...event, markets: marketsByEvent[String(event._id)] || [] }));
+  // eslint-disable-next-line global-require
+  const { mediaFor } = require('./diamondSync.service');
+  return events.map((event) => ({ ...event, ...mediaFor(event), markets: marketsByEvent[String(event._id)] || [] }));
 };
 
 const listProviders = async () => ApiProvider.find().sort({ name: 1 });
 
 const syncAllProviders = async () => {
+  // eslint-disable-next-line global-require
+  const diamondSync = require('./diamondSync.service');
+  // eslint-disable-next-line global-require
+  if (require('./diamond.client').isConfigured()) {
+    await diamondSync.syncNow(); // real refresh; its provider row updates itself
+    return listProviders();
+  }
   const providers = await ApiProvider.find();
   await Promise.all(
     providers.map((provider) =>

@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const { Schema } = mongoose;
 
-/** Connection status for an odds-feed provider. No real external calls are made — "sync" just refreshes these fields. */
+/** Connection status for an odds-feed provider. The Diamond row is kept by diamondSync.service (real latency / uptime / markets). */
 const apiProviderSchema = new Schema(
   {
     name: { type: String, required: true, unique: true, trim: true },

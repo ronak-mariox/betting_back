@@ -86,16 +86,31 @@ async function hasPermission(role, groupKey, permissionKey, action) {
   if (!PERMISSION_INDEX.has(key)) return false;
 
   const doc = await Permission.findOne({ roleKey });
-  const grant = doc?.grants.get(key);
-  if (grant === undefined) {
-    // Not seeded yet — fall back to the compiled-in default.
-    const { permission } = PERMISSION_INDEX.get(key);
-    return (permission.grants[roleKey] || '').includes(action);
-  }
+  // Not seeded yet — fall back to the compiled-in default.
+  const grant = doc?.grants.get(key) ?? PERMISSION_INDEX.get(key).permission.grants[roleKey] ?? '';
+  // The master switch (E) must be on as well as the asked-for right.
   return grant.includes('E') && grant.includes(action);
 }
 
+/**
+ * Every grant of a role at once (one read), for endpoints that check several:
+ * `const can = await checkerFor(role); can('finance', 'walletBalance', 'V')`.
+ */
+async function checkerFor(role) {
+  if (role === 'super-admin') return () => true;
+  const roleKey = ROLE_TO_ROLE_KEY[role];
+  if (!roleKey) return () => false;
+  const doc = await Permission.findOne({ roleKey });
+  return (groupKey, permissionKey, action) => {
+    const key = buildFlatKey(groupKey, permissionKey);
+    if (!PERMISSION_INDEX.has(key)) return false;
+    const grant = doc?.grants.get(key) ?? PERMISSION_INDEX.get(key).permission.grants[roleKey] ?? '';
+    return grant.includes('E') && grant.includes(action);
+  };
+}
+
 module.exports = {
+  checkerFor,
   seedDefaults,
   getMatrixForRoleKey,
   getFullMatrix,

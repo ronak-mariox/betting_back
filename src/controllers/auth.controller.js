@@ -53,7 +53,9 @@ const login = asyncHandler(async (req, res) => {
       req,
       metadata: { username: normalizedUsername },
     });
-    throw ApiError.unauthorized('Invalid username or password');
+    // An unknown username gets its own answer, so the app can point the player to sign-up.
+    if (!user) throw ApiError.notFound('No account found with this username');
+    throw ApiError.unauthorized('Incorrect password');
   }
 
   if (user.status !== 'active') {
@@ -147,7 +149,7 @@ const changePassword = asyncHandler(async (req, res) => {
 const forgotPassword = asyncHandler(async (req, res) => {
   const user = await passwordResetService.requestReset({ username: req.body.username, ip: requestMeta(req).ip });
   if (user) await auditService.record({ actor: user, action: 'password_reset_requested', target: user, req });
-  res.json({ message: 'If that account has an email on file, a reset code has been sent to it.' });
+  res.json({ message: 'If that account has an email or mobile number on file, a reset code has been sent to it.' });
 });
 
 const resetPassword = asyncHandler(async (req, res) => {
@@ -193,18 +195,64 @@ const revokeSession = asyncHandler(async (req, res) => {
 const auditLogs = asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(100, Number(req.query.limit) || 25);
+  // Optional filters: ?action=login_success,login_failed  &status=failed
+  const filter = {};
+  if (req.query.action) filter.action = { $in: String(req.query.action).split(',').map((a) => a.trim()).filter(Boolean) };
+  if (req.query.status) filter.status = String(req.query.status);
 
   const [items, total] = await Promise.all([
-    AuditLog.find()
+    AuditLog.find(filter)
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit)
       .populate('actor', 'username role name')
       .populate('target', 'username role name'),
-    AuditLog.countDocuments(),
+    AuditLog.countDocuments(filter),
   ]);
 
   res.json({ items, total, page, limit });
+});
+
+const liveSessionFilter = () => ({ revokedAt: null, expiresAt: { $gt: new Date() } });
+
+/** Security console headline figures (super-admin). */
+const securityStats = asyncHandler(async (_req, res) => {
+  const now = Date.now();
+  const dayAgo = new Date(now - 24 * 60 * 60 * 1000);
+  const twoDaysAgo = new Date(now - 48 * 60 * 60 * 1000);
+  const [activeSessions, activeUsers, failedLogins, failedLoginsPrev, logins] = await Promise.all([
+    RefreshToken.countDocuments(liveSessionFilter()),
+    RefreshToken.distinct('user', liveSessionFilter()).then((ids) => ids.length),
+    AuditLog.countDocuments({ action: 'login_failed', createdAt: { $gte: dayAgo } }),
+    AuditLog.countDocuments({ action: 'login_failed', createdAt: { $gte: twoDaysAgo, $lt: dayAgo } }),
+    AuditLog.countDocuments({ action: 'login_success', createdAt: { $gte: dayAgo } }),
+  ]);
+  res.json({ activeSessions, activeUsers, failedLogins, failedLoginsPrev, logins });
+});
+
+/** Every signed-in device across the platform, newest first (super-admin). */
+const allSessions = asyncHandler(async (_req, res) => {
+  const sessions = await RefreshToken.find(liveSessionFilter())
+    .sort({ updatedAt: -1 })
+    .limit(200)
+    .select('-tokenHash -replacedByHash')
+    .populate('user', 'username name role');
+  res.json({ sessions });
+});
+
+/** Signs every other account out everywhere; the caller's own devices stay signed in. */
+const revokeAllSessions = asyncHandler(async (req, res) => {
+  const result = await RefreshToken.updateMany(
+    { ...liveSessionFilter(), user: { $ne: req.user._id } },
+    { $set: { revokedAt: new Date() } },
+  );
+  await auditService.record({
+    actor: req.user,
+    action: 'session_revoked',
+    req,
+    metadata: { scope: 'all-other-users', revoked: result.modifiedCount },
+  });
+  res.json({ revoked: result.modifiedCount });
 });
 
 module.exports = {
@@ -220,4 +268,7 @@ module.exports = {
   listSessions,
   revokeSession,
   auditLogs,
+  securityStats,
+  allSessions,
+  revokeAllSessions,
 };

@@ -23,4 +23,16 @@ const transactionSchema = new Schema(
 
 transactionSchema.index({ createdAt: -1 });
 
+/** Live updates: the owner's app and open panel pages refresh when ledger entries change (see realtime.js). */
+function announce(doc) {
+  if (!doc) return;
+  // eslint-disable-next-line global-require
+  const realtime = require('../realtime');
+  realtime.emitPlayerChanged(doc.user);
+  realtime.emitStaffChanged('ledger');
+}
+transactionSchema.post('save', announce);
+transactionSchema.post('findOneAndUpdate', announce);
+transactionSchema.post('insertMany', (docs) => [].concat(docs).forEach(announce));
+
 module.exports = mongoose.model('Transaction', transactionSchema);

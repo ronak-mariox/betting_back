@@ -29,6 +29,17 @@ const authenticate = asyncHandler(async (req, _res, next) => {
   next();
 });
 
+/**
+ * Like authenticate, but an expired / missing access token is not an error —
+ * req.user is just left unset. For logout, where the refresh token in the
+ * body is the credential being revoked.
+ */
+const optionalAuthenticate = (req, res, next) =>
+  authenticate(req, res, (err) => {
+    if (err) req.user = undefined;
+    next();
+  });
+
 /** Restricts a route to a fixed set of roles, e.g. authorize('super-admin'). */
 const authorize = (...roles) => (req, _res, next) => {
   if (!req.user) return next(ApiError.unauthorized());
@@ -66,4 +77,4 @@ const requireOwnSubtree = (paramName = 'id') =>
     next();
   });
 
-module.exports = { authenticate, authorize, requirePermission, requireOwnSubtree };
+module.exports = { authenticate, optionalAuthenticate, authorize, requirePermission, requireOwnSubtree };

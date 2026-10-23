@@ -12,18 +12,25 @@ router.use(authenticate);
 
 const adminOnly = authorize('super-admin');
 const staff = authorize('super-admin', 'franchise', 'super-agent', 'agent');
+/** Players raise tickets from the app's Help screen; staff from the panel. */
+const ticketOwner = authorize('super-admin', 'franchise', 'super-agent', 'agent', 'player');
+/** The Permissions page governs staff only — a player always has its own tickets. */
+const staffGrant = (...args) => {
+  const check = grant(...args);
+  return (req, res, next) => (req.user.role === 'player' ? next() : check(req, res, next));
+};
 
 /**
- * Staff's own tickets: raising one needs the "Raise Ticket" grant, reading
+ * Own tickets (staff and players): raising one needs the "Raise Ticket" grant, reading
  * the history (and replying in it) the "View Tickets" grant. Each account
  * only ever reaches the tickets it raised itself.
  */
-router.get('/my-tickets', staff, grant('support', 'viewTickets', 'V', 'You do not have permission to view tickets'), supportController.listMine);
+router.get('/my-tickets', ticketOwner, staffGrant('support', 'viewTickets', 'V', 'You do not have permission to view tickets'), supportController.listMine);
 
 router.post(
   '/my-tickets',
-  staff,
-  grant('support', 'raiseTicket', 'X', 'You do not have permission to raise tickets'),
+  ticketOwner,
+  staffGrant('support', 'raiseTicket', 'X', 'You do not have permission to raise tickets'),
   [
     body('subject').trim().isLength({ min: 4, max: 120 }).withMessage('Write a subject (4 to 120 characters)'),
     body('category').optional().isString().trim().isLength({ max: 40 }),
@@ -36,8 +43,8 @@ router.post(
 
 router.get(
   '/my-tickets/:id',
-  staff,
-  grant('support', 'viewTickets', 'V', 'You do not have permission to view tickets'),
+  ticketOwner,
+  staffGrant('support', 'viewTickets', 'V', 'You do not have permission to view tickets'),
   [param('id').isMongoId()],
   validate,
   supportController.getMine,
@@ -45,8 +52,8 @@ router.get(
 
 router.post(
   '/my-tickets/:id/messages',
-  staff,
-  grant('support', 'viewTickets', 'V', 'You do not have permission to view tickets'),
+  ticketOwner,
+  staffGrant('support', 'viewTickets', 'V', 'You do not have permission to view tickets'),
   [param('id').isMongoId(), body('body').trim().isLength({ min: 1, max: 2000 })],
   validate,
   supportController.replyMine,

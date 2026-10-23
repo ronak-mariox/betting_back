@@ -36,6 +36,9 @@ const settingsSchema = new Schema(
 settingsSchema.set('toJSON', {
   transform: (_doc, ret) => {
     delete ret.__v;
+    // Secrets go out masked; the settings form sends the mask back to mean "keep it".
+    if (ret.smtp?.pass) ret.smtp = { ...ret.smtp, pass: maskKey(ret.smtp.pass) };
+    if (ret.sms?.apiKey) ret.sms = { ...ret.sms, apiKey: maskKey(ret.sms.apiKey) };
     if (Array.isArray(ret.apiKeys)) {
       ret.apiKeys = ret.apiKeys.map((entry) => ({ ...entry, key: maskKey(entry.key) }));
     }

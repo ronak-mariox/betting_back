@@ -21,8 +21,8 @@ const updateStatus = asyncHandler(async (req, res) => {
   res.json({ market });
 });
 
-const suspendAll = asyncHandler(async (_req, res) => {
-  const result = await marketService.suspendAll();
+const suspendAll = asyncHandler(async (req, res) => {
+  const result = await marketService.suspendAll(req.body?.eventId);
   res.json(result);
 });
 
@@ -32,8 +32,9 @@ const voidMarket = asyncHandler(async (req, res) => {
 });
 
 const settle = asyncHandler(async (req, res) => {
+  // The winner, or for run-based markets (sessions, odd / even, last digit) the runs scored.
   // eslint-disable-next-line global-require
-  res.json(await require('../services/playerBet.service').settleMarket(req.params.id, req.body.winner));
+  res.json(await require('../services/playerBet.service').settleMarketResult(req.params.id, req.body.winner));
 });
 
 module.exports = {

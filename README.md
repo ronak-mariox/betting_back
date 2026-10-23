@@ -31,7 +31,7 @@ agent.
 
 A second, independent authorization layer — the **permission matrix** — governs
 what `franchise` / `super-agent` / `agent` accounts may do to *player*
-accounts specifically (view/create/edit/suspend users, wallet, KYC, …). It's
+accounts specifically (view/create/edit/suspend users, wallet, …). It's
 the same data `bettingWeb/src/features/permissions/PermissionsPage.tsx`
 renders, seeded from the same defaults, editable only by `super-admin`.
 
@@ -59,8 +59,7 @@ server seeds:
   notifications, a support ticket, and the settings singleton) for the
   super-admin panel modules below — idempotent, same `SEED_DEMO_DATA` gate.
   Three app players sit under `agent01`, all with password `player@123`:
-  `demo_rahul` (KYC not submitted), `demo_priya` (KYC pending),
-  `demo_amit` (KYC verified).
+  `demo_rahul`, `demo_priya` and `demo_amit`.
 
 `SEED_DEMO_DATA=false` in `.env` keeps the database as it is — the server never
 seeds demo players or matches on start. Back up with
@@ -82,14 +81,14 @@ Every POST also returns the refreshed `wallet`.
 
 | Method & path | Description |
 | --- | --- |
-| `GET /wallet` | `balance`, `openStake`, `pendingWithdrawal`, `available`, `wonToday`, `kyc`, `minDeposit`, `minWithdrawal`, last `transactions`, `requests`. |
-| `POST /wallet/requests` | Body: `kind` (deposit/withdrawal), `amount`, `method`, `reference`. A deposit needs both its `reference` (the payment's UTR / transaction id, 6 to 40 letters or digits) and `proof` `{ name, data }`, the payment screenshot as a JPG / PNG / WebP data URI of up to 5MB. Withdrawals need verified KYC and `amount ≤ available`. The player's agent (or anyone above) approves it in the panel. |
+| `GET /wallet` | `balance`, `openStake`, `pendingWithdrawal`, `available`, `wonToday`, `minDeposit`, `minWithdrawal`, last `transactions`, `requests`. |
+| `POST /wallet/requests` | Body: `kind` (deposit/withdrawal), `amount`, `method`, `reference`. A deposit needs both its `reference` (the payment's UTR / transaction id, 6 to 40 letters or digits) and `proof` `{ name, data }`, the payment screenshot as a JPG / PNG / WebP data URI of up to 5MB. Withdrawals need `amount ≤ available`. The player's agent (or anyone above) approves it in the panel. |
 | `GET /matches` | Live + upcoming events with Active markets, each market with its `runners` `[{ name, odds }]`. |
 | `GET /matches/:id` | One match in the same shape. |
 | `GET /bets` | The player's bets, newest first, with the current `cashOut` offer on open ones. |
-| `POST /bets` | Body: `marketId`, `selection`, `stake`. Only for players whose KYC is `Verified` (403 otherwise). Checks Settings `bettingLimits`, the market's `maxBet` and `available`. |
+| `POST /bets` | Body: `marketId`, `selection`, `stake`. Checks Settings `bettingLimits`, the market's `maxBet` and `available`. |
 | `POST /bets/:id/cashout` | Closes an open bet at `stake × odds / currentOdds × 0.95`; the difference from the stake is written to the ledger. |
-| `GET /notifications` | The player's own feed, newest first, plus `unreadCount`. Each row: `emoji`, `title`, `body`, `category`, `link` (screen to open: wallet/bets/live/kyc/profile), `unread`, `createdAt`. |
+| `GET /notifications` | The player's own feed, newest first, plus `unreadCount`. Each row: `emoji`, `title`, `body`, `category`, `link` (screen to open: wallet/bets/live/profile), `unread`, `createdAt`. |
 | `PATCH /notifications/:id/read` | Marks one of the player's rows read. |
 | `PATCH /notifications/read-all` | Marks the whole feed read. |
 
@@ -117,16 +116,14 @@ More grants from the matrix that gate real behaviour:
 | Grant | What it allows |
 | --- | --- |
 | `accountSettings.manageSubAgents` X | Create, edit and suspend the staff tier below (a super agent's agents). |
-| `accountSettings.commissionSettings` X | Set commission terms on those accounts (otherwise they're ignored on save). |
+| `accountSettings.commissionSettings` X | Set share holding on those accounts (otherwise it's ignored on save). Session / match commission is set by the direct upline without this grant. |
 | `finance.fundTransfer` X | `POST /wallet/transfer` — body `toUserId`, `amount`, `note`: moves money from the caller's own wallet to an account in its downline. |
 | `reportsAnalytics.exportData` X | `GET /reports/:kind/export`. Previews need only `reports` V. |
 | `support.raiseTicket` X | `POST /support/my-tickets` — body `subject`, `category`, `priority`, `body`. |
 | `support.viewTickets` V | `GET /support/my-tickets`, `GET /support/my-tickets/:id`, `POST /support/my-tickets/:id/messages` — only the caller's own tickets. |
 
-Settling a commission row pays it into that account's wallet. A period keeps
-one Pending row per account (recomputed on every read from the bets placed
-since the period began or since its last settlement) plus a row per
-settlement. Reports take `groupBy` (`Daily` / `Weekly` / `Monthly` /
+Commission is paid automatically at the end of each match (see Commission
+below). Reports take `groupBy` (`Daily` / `Weekly` / `Monthly` /
 `Quarterly`) to roll dated rows up per period; plain `from` / `to` dates are
 whole days in India time.
 
@@ -154,7 +151,7 @@ whole days in India time.
 | `GET /` | List accounts within the caller's own subtree (`super-admin` sees everyone). Query: `role, status, page, limit`. |
 | `GET /me/permissions` | Caller's own permission matrix. |
 | `GET /:id` | Fetch one account — must be the caller or within their subtree. |
-| `PATCH /:id` | Edit profile fields (`name`, `email`, `phone`, `city`, `state`, `dob`, `kyc`) and, for staff, business fields (`businessName`, `creditLimit`, `commissionRate`, `commissionType`, `bettingLimit`, `maxExposure`, `settlementCycle`, `shareHolding`, match/session commission splits). Players need the live `userManagement.editUser` grant; staff are `super-admin`-only. |
+| `PATCH /:id` | Edit profile fields (`name`, `email`, `phone`, `city`, `state`, `dob`) and, for staff, business fields (`businessName`, `bettingLimit`, `maxExposure`, `shareHolding`), plus `matchCommission` / `sessionCommission` for any role (capped at the upline's own rate; the direct upline may always set them). Players need the live `userManagement.editUser` grant; staff are `super-admin`-only. |
 | `PATCH /:id/status` | Suspend/activate. For `player` targets, requires the live `userManagement.suspendUser` grant; staff targets are `super-admin`-only. |
 
 ### Network — `/api/network` (franchise, super-agent, agent, super-admin)
@@ -164,23 +161,9 @@ limited to the caller's own downline (everyone, for `super-admin`).
 
 | Method & path | Description |
 | --- | --- |
-| `GET /accounts` | Query: `role` (franchise/super-agent/agent/player), `status`, `kyc`, `q`, `page`, `limit`. Each row carries `summary` (downline counts, turnover, month-on-month turnover, open exposure, win rate, commission, risk). Also returns header `stats` over the whole role, the caller's `abilities` (create/edit/suspend) and `parentOptions` for new accounts. |
+| `GET /accounts` | Query: `role` (franchise/super-agent/agent/player), `status`, `q`, `page`, `limit`. Each row carries `summary` (downline counts, turnover, month-on-month turnover, open exposure, win rate, commission, risk). Also returns header `stats` over the whole role, the caller's `abilities` (create/edit/suspend) and `parentOptions` for new accounts. |
 | `GET /dashboard` | The caller's own dashboard (Agent dashboard screen): user counts, today's bets/stake/commission/revenue vs yesterday, pending deposits/withdrawals, user overview, 7-day commission (stake × the caller's rate), recent activity and transactions — all limited to the caller's players. |
 | `GET /accounts/:id` | Record sheet: account, ancestors, summary, downline (super agents / agents / players), wallet totals, recent bets, transactions, audit activity and live sessions. |
-
-### KYC — `/api/kyc` (players, from the app)
-
-`User.kyc` is `Not Submitted` until the player completes the app's KYC flow,
-then `Pending` (awaiting review) → `Verified` / `Rejected`. Staff review it in
-the panel by setting `kyc` via `PATCH /api/accounts/:id` (with an optional
-`kycRejectionReason`); the submission's documents come back on
-`GET /api/network/accounts/:id` as `kycSubmission` for roles granted
-"KYC Details" (and super-admin).
-
-| Method & path | Description |
-| --- | --- |
-| `GET /me` | Own KYC status plus the latest submission (document number masked, no images). |
-| `POST /` | Submit: `fullName`, `dob`, `address`, `city`, `state`, `country`, `postalCode`, `documentType` (Aadhaar Card / PAN Card / Passport / Voter ID / Driving License), `documentNumber`, `front` `{name, data}` and optional `back` — `data` is a JPG/PNG/WebP/PDF data URI, max 5MB each. Allowed when not submitted or after a rejection. Body limit 12MB on this route only. |
 
 ### Permissions — `/api/permissions` (all routes authenticated)
 
@@ -265,9 +248,26 @@ roles. Money fields are raw `Number` (rupees), formatted client-side.
 
 | Method & path | Description |
 | --- | --- |
-| `GET /` | Unsettled rows are recomputed from this month's bets on every read. Query: `level` (Franchise/Super Agent/Agent), `status` (Pending/Settled). |
-| `POST /recompute` | Recomputes the current period's commission rows: this month's stake across each account's whole downline × the account's own `commissionRate` (falling back to `Settings.commissionRates`). Already-settled rows are left alone. |
-| `POST /:id/settle` | Flips a row to Settled and writes a `Transaction`. |
+Every account holds `sessionCommission` and `matchCommission`: the percent
+it receives from its direct upline, which sets it (never above its own). An
+account keeps what it receives minus what it passes down; the player keeps
+all of its own rate. Once a match is Completed/Settled and has no pending
+bets, `commission.service.js` (checked every minute) pays each account in
+every player's chain, straight into its wallet with a `Commission` ledger row:
+
+- **Session** — markets decided during the match (toss, fancy, over runs,
+  odd/even, last digit): share × the player's session stake, won or lost.
+- **Match** — Match Odds / Bookmaker: share × the player's net loss on them;
+  nothing on a profit.
+
+Each payout is one Settled row (`event`, `player`, `kind`, `turnover` = the
+base, `rate` = the share). A match is paid once (`Event.commissionSettledAt`).
+
+| Method & path | Description |
+| --- | --- |
+| `GET /` | Commission rows in the caller's scope, newest first. Query: `level` (Franchise/Super Agent/Agent/Player), `status`, `kind` (Session/Match). |
+The player's own statement is `GET /api/player/statement`: per match, the
+session and match results and the commission kept on each.
 
 ### Partnership — `/api/partnership`
 
@@ -368,3 +368,22 @@ requests, high-risk flags, and new support tickets.
 - Login and registration are rate-limited (20 requests / 15 min / IP).
 - Changing a password invalidates every access token issued before the
   change and revokes all refresh tokens.
+
+## Live updates (Socket.IO)
+
+The Diamond feed is REST-only, so the backend polls it (live matches every
+second, `DIAMOND_LIVE_ODDS_MS`) and pushes what changed over Socket.IO on the
+same port as the API. Connect with `io(<server>, { auth: { token: <access token> } })`.
+
+| Event | Sent to | Payload / meaning |
+| --- | --- | --- |
+| `odds` | every client | `{ eventId, markets: [{ _id, name, type, status, maxBet, runners }] }` — only markets whose prices or status changed |
+| `matches:changed` | every client | a match went live / finished or a market opened / closed — refetch `GET /player/matches` |
+| `player:changed` | that player's devices | their wallet or bets changed — refetch them |
+| `admin:changed` | panel (non-player) users | `{ kind: 'bets' \| 'ledger' \| 'wallet' }` — refresh open pages |
+
+Clients may `emit('match:join', eventId)` / `match:leave`. Bets never trust a
+pushed price: the server always takes the market's current odds, and refuses
+bets on feed prices older than 20 s (live). `GET /api/health` reports
+`liveClients`. Running several API servers needs the Socket.IO Redis adapter,
+and only one of them should poll the feed.

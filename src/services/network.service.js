@@ -1,4 +1,3 @@
-const Settings = require('../models/Settings');
 const mongoose = require('mongoose');
 const User = require('../models/User');
 const Bet = require('../models/Bet');
@@ -10,7 +9,6 @@ const RefreshToken = require('../models/RefreshToken');
 const ApiError = require('../utils/ApiError');
 const escapeRegex = require('../utils/escapeRegex');
 const permissionService = require('./permission.service');
-const kycService = require('./kyc.service');
 const { IMMEDIATE_PARENT_ROLE } = require('./account.service');
 const { roleIndex } = require('../constants/roles');
 const { loadTree, descendants } = require('./tree.service');
@@ -35,7 +33,7 @@ function scopeIds(tree, actor) {
 async function loadMetrics(userIds) {
   const thisMonth = monthStart(0);
   const lastMonth = monthStart(-1);
-  const [bets, commissions, flags] = await Promise.all([
+  const [bets, commissions, flags, balances] = await Promise.all([
     Bet.aggregate([
       // Voided bets never counted: nothing was staked in the end.
       { $match: { user: { $in: toObjectIds(userIds) }, status: { $ne: 'Void' } } },
@@ -71,10 +69,16 @@ async function loadMetrics(userIds) {
       { $match: { active: true, user: { $in: toObjectIds(userIds) } } },
       { $group: { _id: '$user', score: { $max: '$score' } } },
     ]),
+    User.find({ _id: { $in: toObjectIds(userIds) } }, 'walletBalance').lean(),
   ]);
 
   const index = (rows) => new Map(rows.map((row) => [String(row._id), row]));
-  return { bets: index(bets), commissions: index(commissions), flags: index(flags) };
+  return {
+    bets: index(bets),
+    commissions: index(commissions),
+    flags: index(flags),
+    balances: new Map(balances.map((row) => [String(row._id), Number(row.walletBalance) || 0])),
+  };
 }
 
 const EMPTY_BETS = { bets: 0, turnover: 0, monthTurnover: 0, prevMonthTurnover: 0, exposure: 0, openBets: 0, won: 0, lost: 0 };
@@ -92,10 +96,12 @@ function summarize(tree, metrics, accountId) {
   const book = [id, ...descendants(tree, id)];
   const totals = { ...EMPTY_BETS };
   const counts = { franchises: 0, superAgents: 0, agents: 0, players: 0 };
+  let downlineBalance = 0;
   for (const memberId of book) {
     const stats = metrics.bets.get(memberId);
     if (stats) for (const key of Object.keys(totals)) totals[key] += stats[key];
     if (memberId === id) continue;
+    downlineBalance += metrics.balances.get(memberId) || 0;
     const role = tree.byId.get(memberId)?.role;
     if (role === 'franchise') counts.franchises += 1;
     if (role === 'super-agent') counts.superAgents += 1;
@@ -107,6 +113,8 @@ function summarize(tree, metrics, accountId) {
   return {
     ...counts,
     ...totals,
+    /** Credit limit = what everyone below this account holds in their wallets. */
+    downlineBalance,
     winRate: settled > 0 ? Math.round((totals.won / settled) * 1000) / 10 : null,
     commission: commission?.total || 0,
     commissionPending: commission?.pending || 0,
@@ -117,7 +125,16 @@ function summarize(tree, metrics, accountId) {
 
 const parentRef = (parent) =>
   parent
-    ? { _id: parent._id, name: parent.name, username: parent.username, businessName: parent.businessName, role: parent.role }
+    ? {
+        _id: parent._id,
+        name: parent.name,
+        username: parent.username,
+        businessName: parent.businessName,
+        role: parent.role,
+        // The most this upline can pass down (see commission.service.js).
+        matchCommission: parent.matchCommission ?? 0,
+        sessionCommission: parent.sessionCommission ?? 0,
+      }
     : null;
 
 /** What the actor may do to accounts of `role` — drives which buttons the panel shows. */
@@ -132,10 +149,10 @@ async function abilitiesFor(actor, role) {
     ]);
     return { create: below && create, edit: below && edit, suspend: below && suspend };
   }
-  // Staff below the actor: onboarding follows the hierarchy (a franchise adds super agents and
-  // agents, a super agent adds agents); changing or blocking them needs "Manage Sub-Agents".
+  // Staff below the actor (a franchise adds super agents and agents, a super agent adds
+  // agents): adding, changing or blocking them all need "Manage Sub-Agents".
   const manage = isAdmin || (await permissionService.hasPermission(actor.role, 'accountSettings', 'manageSubAgents', 'X'));
-  return { create: below, edit: below && manage, suspend: below && manage };
+  return { create: below && manage, edit: below && manage, suspend: below && manage };
 }
 
 /**
@@ -143,14 +160,13 @@ async function abilitiesFor(actor, role) {
  * enriched with its book's totals, plus header stats over the whole role
  * (not just the page) and the parents a new account could be placed under.
  */
-async function listAccounts(actor, { role = 'player', status, kyc, q, page = 1, limit = 25 }) {
+async function listAccounts(actor, { role = 'player', status, q, page = 1, limit = 25 }) {
   const tree = await loadTree();
   const scope = scopeIds(tree, actor);
   const roleIds = scope.filter((id) => tree.byId.get(id)?.role === role);
 
   const filter = { _id: { $in: roleIds } };
   if (status) filter.status = status;
-  if (kyc) filter.kyc = kyc;
   if (q) {
     const regex = new RegExp(escapeRegex(q), 'i');
     filter.$or = [{ name: regex }, { username: regex }, { email: regex }, { phone: regex }, { businessName: regex }];
@@ -161,12 +177,12 @@ async function listAccounts(actor, { role = 'player', status, kyc, q, page = 1, 
 
   const [items, total, roleAccounts] = await Promise.all([
     User.find(filter)
-      .populate('parent', 'name username businessName role')
+      .populate('parent', 'name username businessName role matchCommission sessionCommission')
       .sort({ createdAt: -1 })
       .skip((pageNum - 1) * pageSize)
       .limit(pageSize),
     User.countDocuments(filter),
-    User.find({ _id: { $in: roleIds } }, 'status kyc').lean(),
+    User.find({ _id: { $in: roleIds } }, 'status').lean(),
   ]);
 
   const metrics = await loadMetrics(scope);
@@ -177,7 +193,6 @@ async function listAccounts(actor, { role = 'player', status, kyc, q, page = 1, 
     total: roleAccounts.length,
     active: roleAccounts.filter((row) => row.status === 'active').length,
     suspended: roleAccounts.filter((row) => row.status === 'suspended').length,
-    kycPending: roleAccounts.filter((row) => row.kyc === 'Pending').length,
     players: role === 'player' ? roleAccounts.length : sum('players'),
     turnover: sum('turnover'),
     monthTurnover: sum('monthTurnover'),
@@ -196,17 +211,16 @@ async function listAccounts(actor, { role = 'player', status, kyc, q, page = 1, 
   if (parentRole && parentRole !== 'super-admin') {
     const parentIds = scope.filter((id) => tree.byId.get(id)?.role === parentRole);
     if (actor.role === parentRole) parentIds.unshift(String(actor._id));
-    parentOptions = await User.find({ _id: { $in: parentIds }, status: 'active' }, 'name username businessName role')
+    parentOptions = await User.find({ _id: { $in: parentIds }, status: 'active' }, 'name username businessName role matchCommission sessionCommission')
       .sort({ name: 1 })
       .lean();
   }
 
   return {
-    items: items.map((account) => ({
-      ...account.toJSON(),
-      parent: parentRef(account.parent),
-      summary: summaries.get(String(account._id)),
-    })),
+    items: items.map((account) => {
+      const summary = summaries.get(String(account._id));
+      return { ...account.toJSON(), creditLimit: summary.downlineBalance, parent: parentRef(account.parent), summary };
+    }),
     total,
     page: pageNum,
     limit: pageSize,
@@ -233,23 +247,26 @@ async function getAccountDetail(actor, id) {
     chain.push(cursor);
     cursor = tree.byId.get(cursor).parent;
   }
-  const ancestors = await User.find({ _id: { $in: chain } }, 'name username businessName role').lean();
+  const ancestors = await User.find({ _id: { $in: chain } }, 'name username businessName role matchCommission sessionCommission').lean();
   const ancestorList = chain.map((ancestorId) => ancestors.find((row) => String(row._id) === ancestorId)).filter(Boolean);
 
   const downlineOf = async (role) => {
     const ids = downIds.filter((memberId) => tree.byId.get(memberId)?.role === role);
     const rows = await User.find({ _id: { $in: ids } })
-      .populate('parent', 'name username businessName role')
+      .populate('parent', 'name username businessName role matchCommission sessionCommission')
       .sort({ createdAt: -1 })
       .limit(DETAIL_LIST_LIMIT);
     return {
       total: ids.length,
-      items: rows.map((row) => ({ ...row.toJSON(), parent: parentRef(row.parent), summary: summarize(tree, metrics, row._id) })),
+      items: rows.map((row) => {
+        const summary = summarize(tree, metrics, row._id);
+        return { ...row.toJSON(), creditLimit: summary.downlineBalance, parent: parentRef(row.parent), summary };
+      }),
     };
   };
 
   const bookObjectIds = toObjectIds(book);
-  const [superAgents, agents, players, bets, transactions, flows, activity, sessions, abilities, kycSubmission] = await Promise.all([
+  const [superAgents, agents, players, bets, transactions, flows, activity, sessions, abilities] = await Promise.all([
     downlineOf('super-agent'),
     downlineOf('agent'),
     downlineOf('player'),
@@ -275,10 +292,6 @@ async function getAccountDetail(actor, id) {
       .sort({ updatedAt: -1 })
       .limit(10),
     abilitiesFor(actor, account.role),
-    // KYC documents are sensitive: only roles granted "KYC Details" (and super-admin) get them.
-    account.role === 'player' && (await permissionService.hasPermission(actor.role, 'userManagement', 'kycDetails', 'V'))
-      ? kycService.getForStaff(account._id)
-      : null,
   ]);
 
   const flow = (type) => flows.find((row) => row._id === type)?.total || 0;
@@ -287,9 +300,8 @@ async function getAccountDetail(actor, id) {
   return {
     account: {
       ...account.toJSON(),
+      creditLimit: summary.downlineBalance,
       parent: parentRef(ancestorList[0] ?? null),
-      // The rate actually applied: the account's own, else the platform default for its role.
-      commissionRateInForce: account.commissionRate ?? (Number((await Settings.findById('main').lean())?.commissionRates?.[account.role]) || null),
     },
     ancestors: ancestorList.map(parentRef),
     summary,
@@ -306,7 +318,6 @@ async function getAccountDetail(actor, id) {
     activity,
     sessions,
     abilities: String(actor._id) === String(id) ? { create: false, edit: false, suspend: false } : abilities,
-    kycSubmission,
   };
 }
 

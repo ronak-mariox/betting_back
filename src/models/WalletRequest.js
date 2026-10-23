@@ -39,4 +39,16 @@ const walletRequestSchema = new Schema(
 
 walletRequestSchema.index({ createdAt: -1 });
 
+/** Live updates: the owner's app and open panel pages refresh when wallet requests change (see realtime.js). */
+function announce(doc) {
+  if (!doc) return;
+  // eslint-disable-next-line global-require
+  const realtime = require('../realtime');
+  realtime.emitPlayerChanged(doc.user);
+  realtime.emitStaffChanged('wallet');
+}
+walletRequestSchema.post('save', announce);
+walletRequestSchema.post('findOneAndUpdate', announce);
+walletRequestSchema.post('insertMany', (docs) => [].concat(docs).forEach(announce));
+
 module.exports = mongoose.model('WalletRequest', walletRequestSchema);

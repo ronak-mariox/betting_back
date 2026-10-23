@@ -8,11 +8,8 @@ const ApiProvider = require('../models/ApiProvider');
 const AuditLog = require('../models/AuditLog');
 const analyticsService = require('./analytics.service');
 
-const startOfToday = () => {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
-};
+/** Midnight in the platform's timezone (Settings → General), not the server's. */
+const startOfToday = () => require('../utils/time').startOfDay(0); // eslint-disable-line global-require
 
 const getDashboard = async () => {
   const [
@@ -71,7 +68,7 @@ const getDashboard = async () => {
     health: {
       providers: providers.length,
       healthyProviders,
-      status: healthyProviders === providers.length ? 'Operational' : 'Degraded',
+      status: providers.length === 0 ? 'No providers' : healthyProviders === providers.length ? 'Operational' : 'Degraded',
     },
     transactions: recentTransactions,
     bets: recentBets,

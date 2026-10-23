@@ -10,6 +10,9 @@ router.use(authenticate, authorize('super-admin'));
 router.get('/stats', riskController.stats);
 router.get('/exposure', riskController.exposure);
 router.get('/panels', riskController.panels);
+router.post('/scan', riskController.scan);
+router.patch('/flagged/:id/resolve', [param('id').isMongoId()], validate, riskController.resolveFlag);
+router.patch('/patterns/:id/resolve', [param('id').isMongoId()], validate, riskController.resolvePattern);
 router.patch(
   '/exposure/:marketId/suspend',
   [param('marketId').isMongoId()],

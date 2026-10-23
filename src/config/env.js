@@ -31,6 +31,18 @@ const env = {
     pass: process.env.SMTP_PASS || '',
     from: process.env.MAIL_FROM || process.env.SMTP_USER || 'no-reply@betting.local',
   },
+  /** Diamond odds feed (cricket). Off when DIAMOND_API_KEY is empty. */
+  diamond: {
+    baseUrl: (process.env.DIAMOND_BASE_URL || 'http://46.202.166.33:3009').replace(/\/$/, ''),
+    apiKey: process.env.DIAMOND_API_KEY || '',
+    /** Embeddable players, `gmid` appended. */
+    streamUrl: process.env.DIAMOND_STREAM_URL || 'https://live.cricketid.xyz/directStream?gmid=',
+    scoreUrl: process.env.DIAMOND_SCORE_URL || 'https://score.akamaized.uk/diamond-live-score?gmid=',
+    matchListMs: Number(process.env.DIAMOND_MATCH_LIST_MS) || 30000,
+    liveOddsMs: Number(process.env.DIAMOND_LIVE_ODDS_MS) || 1000,
+    upcomingOddsMs: Number(process.env.DIAMOND_UPCOMING_ODDS_MS) || 60000,
+    resultsMs: Number(process.env.DIAMOND_RESULTS_MS) || 120000,
+  },
   passwordReset: {
     codeTtlMinutes: Number(process.env.RESET_CODE_TTL_MINUTES) || 10,
     maxAttempts: 5,

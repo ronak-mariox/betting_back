@@ -23,7 +23,18 @@ router.post(
   partnershipController.createPartner,
 );
 
-router.patch('/partners/:id', [param('id').isMongoId()], validate, partnershipController.updatePartner);
+router.patch(
+  '/partners/:id',
+  [
+    param('id').isMongoId(),
+    body('name').optional().trim().notEmpty(),
+    body('revShare').optional().isFloat({ min: 0, max: 100 }),
+    body('monthlyFee').optional().isFloat({ min: 0 }),
+    body('email').optional({ checkFalsy: true }).isEmail(),
+  ],
+  validate,
+  partnershipController.updatePartner,
+);
 
 router.patch(
   '/partners/:id/status',
@@ -34,5 +45,6 @@ router.patch(
 
 router.get('/revenue', partnershipController.revenue);
 router.get('/settlements', partnershipController.settlements);
+router.post('/settlements/:id/pay', [param('id').isMongoId()], validate, partnershipController.paySettlement);
 
 module.exports = router;

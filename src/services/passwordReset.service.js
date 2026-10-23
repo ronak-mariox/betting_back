@@ -4,10 +4,12 @@ const User = require('../models/User');
 const PasswordReset = require('../models/PasswordReset');
 const ApiError = require('../utils/ApiError');
 const mailService = require('./mail.service');
+const smsService = require('./sms.service');
 const tokenService = require('./token.service');
 const { hashPassword } = require('./password.service');
+const { cached } = require('./settings.service');
 
-const { codeTtlMinutes, maxAttempts, resendCooldownSeconds } = env.passwordReset;
+const { maxAttempts, resendCooldownSeconds } = env.passwordReset;
 
 /** Keyed hash, so a leaked PasswordReset row can't be brute-forced offline in a million guesses. */
 const hashCode = (userId, code) =>
@@ -20,16 +22,19 @@ const isMasterCode = (code) =>
   env.nodeEnv !== 'production' && Boolean(env.passwordReset.masterCode) && code === env.passwordReset.masterCode;
 
 /**
- * "Forgot password?" step 1: emails a 6-digit code to the account's address
- * on file. Silently does nothing for unknown, suspended or email-less
- * accounts (and within the resend cooldown), so the caller's response never
+ * "Forgot password?" step 1: sends a 6-digit code to the account's email
+ * (SMTP) and / or mobile (SMS gateway) on file. Silently does nothing for
+ * unknown, suspended or unreachable accounts (and within the resend cooldown), so the caller's response never
  * reveals which usernames exist. Returns true when a code was issued.
  */
 async function requestReset({ username, ip }) {
   const user = await User.findOne({ username: username.trim().toLowerCase() });
   if (!user || user.status !== 'active') return false;
-  // Without SMTP (development) the mail is logged, so email-less accounts can still be tested.
-  if (!user.email && mailService.isConfigured()) return false;
+  const byEmail = Boolean(user.email) && mailService.isConfigured();
+  const bySms = Boolean(user.phone) && smsService.isConfigured();
+  // With no gateway at all (development) the code is logged, so any account can still be tested.
+  if (!byEmail && !bySms && (mailService.isConfigured() || smsService.isConfigured())) return false;
+  const codeTtlMinutes = smsService.otpValidityMinutes();
 
   const existing = await PasswordReset.findOne({ user: user._id });
   if (existing && Date.now() - existing.updatedAt.getTime() < resendCooldownSeconds * 1000) return false;
@@ -46,14 +51,33 @@ async function requestReset({ username, ip }) {
     { upsert: true, setDefaultsOnInsert: true },
   );
 
-  await mailService.sendMail({
-    to: user.email,
-    subject: 'Your password reset code',
-    text:
-      `Hi ${user.name || user.username},\n\n` +
-      `Your password reset code is ${code}. It expires in ${codeTtlMinutes} minutes.\n\n` +
-      'If you did not ask to reset your password, ignore this email — your password stays the same.',
-  });
+  const brand = cached().brand?.brandName || cached().general?.platformName || 'Your account';
+  const sends = [];
+  if (byEmail || !bySms) {
+    sends.push(
+      mailService.sendMail({
+        to: user.email,
+        subject: 'Your password reset code',
+        text:
+          `Hi ${user.name || user.username},\n\n` +
+          `Your password reset code is ${code}. It expires in ${codeTtlMinutes} minutes.\n\n` +
+          'If you did not ask to reset your password, ignore this email — your password stays the same.',
+      }),
+    );
+  }
+  if (bySms) {
+    sends.push(
+      smsService.sendSms({
+        to: user.phone,
+        text: `${brand}: your password reset code is ${code}. Valid for ${codeTtlMinutes} minutes. Do not share it.`,
+      }),
+    );
+  }
+  // One channel failing (bad SMTP login, SMS balance) shouldn't hide the other.
+  const results = await Promise.allSettled(sends);
+  results
+    .filter((r) => r.status === 'rejected')
+    .forEach((r) => console.warn(`[password reset] ${r.reason?.message || r.reason}`)); // eslint-disable-line no-console
   return user;
 }
 

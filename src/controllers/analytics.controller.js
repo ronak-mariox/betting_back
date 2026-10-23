@@ -10,4 +10,8 @@ const highlights = asyncHandler(async (_req, res) => {
   res.json({ highlights: await analyticsService.getHighlights() });
 });
 
-module.exports = { series, highlights };
+const growth = asyncHandler(async (_req, res) => {
+  res.json({ growth: await analyticsService.getGrowth() });
+});
+
+module.exports = { series, highlights, growth };

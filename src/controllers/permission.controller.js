@@ -36,6 +36,9 @@ const updateGrant = asyncHandler(async (req, res) => {
     metadata: { roleKey, groupKey, permissionKey, grant },
   });
 
+  // That role's open panels reload their menu and buttons (realtime.js).
+  // eslint-disable-next-line global-require
+  require('../realtime').emitPermissionsChanged(roleKey);
   res.json({ groups: await permissionService.getMatrixForRoleKey(roleKey) });
 });
 

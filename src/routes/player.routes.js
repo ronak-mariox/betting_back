@@ -47,19 +47,36 @@ router.post(
 
 router.get('/matches', playerController.matches);
 router.get('/matches/:id', [param('id').isMongoId()], validate, playerController.match);
+// Live score card of a feed match as JSON (null when the provider has none).
+router.get('/matches/:id/score', [param('id').isMongoId()], validate, playerController.score);
 
 router.get('/bets', playerController.bets);
 router.post(
   '/bets',
-  [body('marketId').isMongoId(), body('selection').isString().trim().notEmpty(), body('stake').isFloat({ gt: 0 })],
+  [
+    body('marketId').isMongoId(),
+    body('selection').isString().trim().notEmpty(),
+    body('stake').isFloat({ gt: 0 }),
+    // The price the player saw on the slip (optional for older app builds).
+    body('odds').optional().isFloat({ gt: 1 }).toFloat(),
+  ],
   validate,
   playerController.placeBet,
 );
-router.post('/bets/:id/cashout', [param('id').isMongoId()], validate, playerController.cashOut);
+router.post(
+  '/bets/:id/cashout',
+  // `expected`: the offer the player confirmed (optional for older app builds).
+  [param('id').isMongoId(), body('expected').optional().isFloat({ min: 0 }).toFloat()],
+  validate,
+  playerController.cashOut,
+);
 
-// The player's own notification feed (deposits, bets, KYC, logins, promotions).
+// The player's own notification feed (deposits, bets, logins, promotions).
 router.get('/notifications', [query('limit').optional().isInt({ min: 1, max: 100 })], validate, playerController.notifications);
 router.patch('/notifications/read-all', playerController.readAllNotifications);
 router.patch('/notifications/:id/read', [param('id').isMongoId()], validate, playerController.readNotification);
+
+// Match-wise statement: session / match results and the commission earned on each match.
+router.get('/statement', playerController.statement);
 
 module.exports = router;

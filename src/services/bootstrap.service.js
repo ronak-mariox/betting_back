@@ -5,8 +5,8 @@ const { hashPassword } = require('./password.service');
 const permissionService = require('./permission.service');
 const { seedAdminDemoData } = require('./seed.service');
 const { ensureAgentReferralCodes } = require('./account.service');
-const { normalizeLegacyStatuses, backfillProfilesFromKyc } = require('./kyc.service');
 const { backfillPlayerFeeds } = require('./notification.service');
+const { ensurePartnerCodes } = require('./partnership.service');
 
 /**
  * Every hierarchy needs a root. If no super-admin exists yet, one is
@@ -104,8 +104,7 @@ async function runBootstrap() {
     console.error('Demo data seed failed (server continues):', err.message); // eslint-disable-line no-console
   }
   await ensureAgentReferralCodes();
-  await normalizeLegacyStatuses();
-  await backfillProfilesFromKyc();
+  await ensurePartnerCodes();
   try {
     await backfillPlayerFeeds();
   } catch (err) {

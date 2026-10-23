@@ -6,6 +6,9 @@
   "author": "mariox software",
   "type": "commonjs",
   "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
@@ -21,7 +24,9 @@
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.10.0",
-    "nodemailer": "^10.0.15"
+    "node-cron": "^4.6.0",
+    "nodemailer": "^10.0.15",
+    "socket.io": "^4.8.4"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

@@ -1,5 +1,5 @@
 /** Shared enums for the super-admin panel's modules (wallet, betting, risk, commission, …). */
-const TRANSACTION_TYPES = ['Deposit', 'Withdrawal', 'Bet Win', 'Bet Loss', 'Adjustment', 'Commission', 'Payment'];
+const TRANSACTION_TYPES = ['Deposit', 'Withdrawal', 'Bet Win', 'Bet Loss', 'Adjustment', 'Commission', 'Payment', 'Referral Bonus'];
 const TRANSACTION_STATUSES = ['Pending', 'Completed', 'Failed'];
 
 const WALLET_REQUEST_KINDS = ['deposit', 'withdrawal'];
@@ -12,17 +12,13 @@ const EVENT_STATUSES = ['Live', 'Upcoming', 'Suspended', 'Completed', 'Settled']
 const MARKET_STATUSES = ['Active', 'Suspended'];
 const BET_STATUSES = ['Pending', 'Won', 'Lost', 'Void', 'Cashed Out'];
 
-const COMMISSION_LEVELS = ['Franchise', 'Super Agent', 'Agent'];
+const COMMISSION_LEVELS = ['Franchise', 'Super Agent', 'Agent', 'Player'];
 const COMMISSION_STATUSES = ['Pending', 'Settled'];
-
-/** Staff account commission models, mirroring the Create Franchise modal. */
-const COMMISSION_TYPES = ['Flat', 'Slab based', 'Turnover based'];
-const SETTLEMENT_CYCLES = ['Daily', 'Weekly', 'Monthly'];
-
-/** Documents a player can submit for KYC, matching the app's picker. */
-const KYC_DOCUMENT_TYPES = ['Aadhaar Card', 'PAN Card', 'Passport', 'Voter ID', 'Driving License'];
-/** 'Not Submitted' until the player sends documents; 'Pending' means awaiting review. */
-const KYC_STATUSES = ['Not Submitted', 'Pending', 'Verified', 'Rejected'];
+/**
+ * Session: markets decided during the match (toss, fancy, over runs, odd/even, …), paid on stake.
+ * Match: markets decided by the result (Match Odds, Bookmaker, …), paid on the player's net loss.
+ */
+const COMMISSION_KINDS = ['Session', 'Match'];
 
 const PARTNER_STATUSES = ['Active', 'Inactive', 'Pending'];
 
@@ -31,11 +27,13 @@ const TICKET_PRIORITIES = ['Low', 'Medium', 'High', 'Urgent'];
 
 const CMS_KINDS = ['Announcement', 'Banner', 'Promotion', 'Notice'];
 const CMS_STATUSES = ['Draft', 'Published', 'Archived'];
+/** Who a CMS item is for: everyone, the app's players, or the staff panels. */
+const CMS_TARGETS = ['All', 'Players', 'Staff'];
 
 /** risk / wallet / general feed the admin panel; the rest are the player app's (notification.service.js#notifyPlayer). */
-const NOTIFICATION_CATEGORIES = ['risk', 'wallet', 'general', 'bet', 'live', 'kyc', 'security', 'promo'];
+const NOTIFICATION_CATEGORIES = ['risk', 'wallet', 'general', 'bet', 'live', 'security', 'promo'];
 /** Screen a player notification opens in the app when tapped. */
-const NOTIFICATION_LINKS = ['', 'wallet', 'bets', 'live', 'kyc', 'profile'];
+const NOTIFICATION_LINKS = ['', 'wallet', 'bets', 'live', 'profile'];
 
 module.exports = {
   TRANSACTION_TYPES,
@@ -48,15 +46,13 @@ module.exports = {
   BET_STATUSES,
   COMMISSION_LEVELS,
   COMMISSION_STATUSES,
-  COMMISSION_TYPES,
-  KYC_DOCUMENT_TYPES,
-  KYC_STATUSES,
-  SETTLEMENT_CYCLES,
+  COMMISSION_KINDS,
   PARTNER_STATUSES,
   TICKET_STATUSES,
   TICKET_PRIORITIES,
   CMS_KINDS,
   CMS_STATUSES,
+  CMS_TARGETS,
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_LINKS,
 };

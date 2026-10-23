@@ -18,7 +18,7 @@ const listMarkets = async ({ eventId, status, type }) => {
 const pick = (data) => Object.fromEntries(EDITABLE.filter((key) => data[key] !== undefined).map((key) => [key, data[key]]));
 
 const sidesOf = (eventName) => {
-  const [home, away] = String(eventName || '').split(/\s+vs\.?\s+/i);
+  const [home, away] = String(eventName || '').split(/\s+(?:vs\.?|v\.?|-)\s+/i);
   return [home || 'Home', away || 'Away'];
 };
 
@@ -93,6 +93,7 @@ const updateMarket = async (id, updates) => {
   }
   if (next.status === 'Active' && market.winner) throw ApiError.conflict('This market is already settled');
 
+  if (next.status) next.adminSuspended = next.status === 'Suspended';
   market.set(next);
   await market.save();
   return market;
@@ -104,12 +105,21 @@ const updateMarketStatus = async (id, status) => {
   // A settled market's bets are paid out; reopening it would take bets on a known result.
   if (market.winner && status === 'Active') throw ApiError.conflict('This market is already settled');
   market.status = status;
+  // Feed markets: an admin's choice holds until the admin changes it again.
+  market.adminSuspended = status === 'Suspended';
+  market.suspendedWithEvent = false;
+  // Reopened: a fresh exposure warning can fire again.
+  if (status === 'Active') market.exposureWarnedAt = null;
   await market.save();
   return market;
 };
 
-const suspendAll = async () => {
-  const result = await Market.updateMany({ status: 'Active' }, { $set: { status: 'Suspended' } });
+/** Suspends every Active market — on one event when `eventId` is given, else platform-wide. */
+const suspendAll = async (eventId) => {
+  const filter = { status: 'Active', ...(eventId ? { event: eventId } : {}) };
+  const result = await Market.updateMany(filter, { $set: { status: 'Suspended', adminSuspended: true } });
+  // eslint-disable-next-line global-require
+  if (result.modifiedCount) require('../realtime').emitMatchesChanged();
   return { modifiedCount: result.modifiedCount };
 };
 

@@ -54,7 +54,7 @@ const REPORT_BUILDERS = {
   },
   user: async ({ scope }) => {
     const rows = await User.find(applyScope({}, scope, '_id'))
-      .select('username name phone role status kyc walletBalance lastLoginAt createdAt')
+      .select('username name phone role status walletBalance lastLoginAt createdAt')
       .sort({ createdAt: -1 })
       .limit(1000)
       .lean();
@@ -64,8 +64,6 @@ const REPORT_BUILDERS = {
       phone: r.phone || '',
       role: r.role,
       status: r.status,
-      // KYC only applies to players; staff rows leave it blank.
-      kyc: r.role === 'player' ? r.kyc : '',
       walletBalance: r.walletBalance,
       lastLogin: r.lastLoginAt,
       joined: r.createdAt,
@@ -129,12 +127,12 @@ const REPORT_BUILDERS = {
   },
 };
 
-const IST = 'Asia/Kolkata';
+const { timezone } = require('../utils/time');
 
-/** The label of the period a date falls in: a day, the week's Monday, a month or a quarter (IST). */
+/** The label of the period a date falls in: a day, the week's Monday, a month or a quarter (platform timezone). */
 function periodOf(date, groupBy) {
   const parts = Object.fromEntries(
-    new Intl.DateTimeFormat('en-CA', { timeZone: IST, year: 'numeric', month: '2-digit', day: '2-digit' })
+    new Intl.DateTimeFormat('en-CA', { timeZone: timezone(), year: 'numeric', month: '2-digit', day: '2-digit' })
       .formatToParts(new Date(date))
       .map((part) => [part.type, part.value]),
   );

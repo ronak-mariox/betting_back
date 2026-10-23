@@ -1,6 +1,5 @@
 const mongoose = require('mongoose');
 const { ROLE_ORDER } = require('../constants/roles');
-const { COMMISSION_TYPES, SETTLEMENT_CYCLES, KYC_STATUSES } = require('../constants/admin');
 
 const { Schema } = mongoose;
 
@@ -53,12 +52,6 @@ const userSchema = new Schema(
      * headroom over the ~150-300KB a resized photo typically produces.
      */
     avatar: { type: String, default: '', maxlength: 2_000_000 },
-    /** Player-only KYC state: 'Not Submitted' until documents arrive, then 'Pending' review → Verified/Rejected. */
-    kyc: {
-      type: String,
-      enum: KYC_STATUSES,
-      default: 'Not Submitted',
-    },
     /** Players and agents: this account's own referral code. A player's earns the sign-up bonus; an agent's places new players on its panel. */
     referralCode: {
       type: String,
@@ -66,6 +59,13 @@ const userSchema = new Schema(
       uppercase: true,
       unique: true,
       sparse: true,
+    },
+    /** Player-only: the partner (affiliate) whose code was used at sign-up; drives the partner's volume and revenue share. */
+    partner: {
+      type: Schema.Types.ObjectId,
+      ref: 'Partner',
+      default: null,
+      index: true,
     },
     /** Player-only: the account whose referral code was used at sign-up, if any. */
     referredBy: {
@@ -89,22 +89,19 @@ const userSchema = new Schema(
 
     /** Staff-only: trading name shown in the panel, e.g. "Mumbai Franchise" (the person's own name stays in `name`). */
     businessName: { type: String, trim: true, default: '' },
-    /** Staff-only: credit extended to this account, in rupees. */
-    creditLimit: { type: Number, min: 0, default: 0 },
-    /** Staff-only: commission percent for this account; null falls back to Settings.commissionRates for its role. */
-    commissionRate: { type: Number, min: 0, max: 100, default: null },
-    commissionType: { type: String, enum: COMMISSION_TYPES, default: 'Flat' },
     /** Staff-only: max single-bet stake allowed across this account's book, in rupees (0 = platform default). */
     bettingLimit: { type: Number, min: 0, default: 0 },
     /** Staff-only: max open exposure allowed across this account's book, in rupees (0 = platform default). */
     maxExposure: { type: Number, min: 0, default: 0 },
-    settlementCycle: { type: String, enum: SETTLEMENT_CYCLES, default: 'Weekly' },
-    /** Staff-only share and commission splits (percent), as captured by the Create Franchise form. */
+    /** Staff-only share (percent), as captured by the Create Franchise form. */
     shareHolding: { type: Number, min: 0, max: 100, default: null },
-    matchCommission: { type: Number, min: 0, max: 100, default: null },
-    myMatchCommission: { type: Number, min: 0, max: 100, default: null },
-    sessionCommission: { type: Number, min: 0, max: 100, default: null },
-    mySessionCommission: { type: Number, min: 0, max: 100, default: null },
+    /**
+     * Commission rates this account receives from its upline, in percent (see
+     * commission.service.js). Set by the upline, never above the upline's own
+     * rate; the account keeps what it doesn't pass on to its own downline.
+     */
+    matchCommission: { type: Number, min: 0, max: 100, default: 0 },
+    sessionCommission: { type: Number, min: 0, max: 100, default: 0 },
   },
   { timestamps: true },
 );
@@ -115,6 +112,15 @@ userSchema.set('toJSON', {
   transform: (_doc, ret) => {
     delete ret.passwordHash;
     delete ret.__v;
+    // Left on older records by removed features (KYC, the old monthly commission); never sent out.
+    delete ret.kyc;
+    delete ret.commissionRate;
+    delete ret.commissionType;
+    delete ret.settlementCycle;
+    delete ret.myMatchCommission;
+    delete ret.mySessionCommission;
+    ret.matchCommission = ret.matchCommission ?? 0;
+    ret.sessionCommission = ret.sessionCommission ?? 0;
     return ret;
   },
 });

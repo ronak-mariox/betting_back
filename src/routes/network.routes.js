@@ -1,7 +1,7 @@
 const { Router } = require('express');
-const { param, query } = require('express-validator');
+const { body, param, query } = require('express-validator');
+const { grant } = require('../services/scope.service');
 const networkController = require('../controllers/network.controller');
-const { KYC_STATUSES } = require('../constants/admin');
 const validate = require('../middleware/validate');
 const { authenticate, authorize, requireOwnSubtree } = require('../middleware/auth');
 
@@ -24,15 +24,33 @@ router.get(
   [
     query('role').optional().isIn(['franchise', 'super-agent', 'agent', 'player']),
     query('status').optional().isIn(['active', 'suspended']),
-    query('kyc').optional().isIn(KYC_STATUSES),
     query('q').optional().isString().isLength({ max: 100 }),
     query('page').optional().isInt({ min: 1 }),
     query('limit').optional().isInt({ min: 1, max: 100 }),
   ],
   validate,
+  networkController.userList,
   networkController.list,
 );
 
-router.get('/accounts/:id', [param('id').isMongoId()], validate, requireOwnSubtree('id'), networkController.getOne);
+router.get('/accounts/:id', [param('id').isMongoId()], validate, networkController.userList, requireOwnSubtree('id'), networkController.getOne);
+
+// Betting side for staff, each behind its Permissions-page grant.
+router.get('/events', grant('bettingMarkets', 'events', 'V', 'You do not have permission to view events'), networkController.events);
+router.get(
+  '/markets',
+  grant('bettingMarkets', 'markets', 'V', 'You do not have permission to view markets'),
+  [query('eventId').optional().isMongoId()],
+  validate,
+  networkController.markets,
+);
+router.get('/analytics', grant('reportsAnalytics', 'analytics', 'V', 'You do not have permission to view analytics'), networkController.analytics);
+router.post(
+  '/bets/:id/void',
+  grant('bettingMarkets', 'voidBet', 'X', 'You do not have permission to void bets'),
+  [param('id').isMongoId(), body('reason').optional().isString().trim().isLength({ max: 200 })],
+  validate,
+  networkController.voidBet,
+);
 
 module.exports = router;

@@ -10,6 +10,10 @@ const suspiciousPatternSchema = new Schema(
     severity: { type: String, enum: ['Low', 'Medium', 'High'], default: 'Medium', index: true },
     detectedAt: { type: Date, default: Date.now },
     resolved: { type: Boolean, default: false, index: true },
+    /** Identifies what was detected (e.g. "shared-ip:1.2.3.4"), so a re-scan updates instead of duplicating. */
+    key: { type: String, default: '', index: true },
+    resolvedBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+    resolvedAt: { type: Date, default: null },
   },
   { timestamps: true },
 );

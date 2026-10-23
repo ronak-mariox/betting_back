@@ -13,14 +13,13 @@ const Settings = require('../models/Settings');
  * the upline set one, otherwise the platform default from Settings (flagged,
  * so the page can say which it is).
  */
-function effectiveLimits(actor, settings) {
+function effectiveLimits(actor, settings, detail) {
   const own = (value) => Number(value) > 0;
   const platform = (value) => (Number(value) > 0 ? Number(value) : null);
   return {
-    commissionRate: {
-      value: actor.commissionRate ?? platform(settings?.commissionRates?.[actor.role]),
-      isDefault: actor.commissionRate === null || actor.commissionRate === undefined,
-    },
+    /** Session / match commission this account receives from its upline, in percent. */
+    matchCommission: Number(actor.matchCommission) || 0,
+    sessionCommission: Number(actor.sessionCommission) || 0,
     bettingLimit: {
       value: own(actor.bettingLimit) ? actor.bettingLimit : platform(settings?.bettingLimits?.maxBet),
       isDefault: !own(actor.bettingLimit),
@@ -30,7 +29,8 @@ function effectiveLimits(actor, settings) {
     maxExposure: own(actor.maxExposure) ? actor.maxExposure : null,
     /** Platform cap on one player's open stakes. */
     maxUserExposure: platform(settings?.exposureLimits?.maxUserExposure),
-    creditLimit: own(actor.creditLimit) ? actor.creditLimit : null,
+    /** Sum of the wallet balances of everyone below this account. */
+    creditLimit: detail ? detail.summary.downlineBalance : null,
     walletRules: settings?.walletRules || null,
   };
 }
@@ -54,7 +54,7 @@ async function getMyProfile(actor, currentSessionUserAgent = '') {
       .sort({ updatedAt: -1 })
       .lean(),
     actor.role === 'super-admin' ? null : networkService.getAccountDetail(actor, actor._id),
-    Settings.findById('main').select('commissionRates bettingLimits exposureLimits walletRules').lean(),
+    Settings.findById('main').select('bettingLimits exposureLimits walletRules').lean(),
   ]);
 
   return {
@@ -70,7 +70,7 @@ async function getMyProfile(actor, currentSessionUserAgent = '') {
     currentUserAgent: currentSessionUserAgent,
     wallet: detail && { ...detail.wallet, transactions: detail.transactions },
     preferences: Object.fromEntries(actor.preferences || []),
-    limits: effectiveLimits(actor, settings),
+    limits: effectiveLimits(actor, settings, detail),
   };
 }
 

@@ -10,7 +10,7 @@ const TAB_TYPES = {
   deposits: ['Deposit'],
   withdrawals: ['Withdrawal'],
   bets: ['Bet Win', 'Bet Loss'],
-  commission: ['Commission'],
+  commission: ['Commission', 'Referral Bonus'],
   payments: ['Payment'],
   adjustments: ['Adjustment'],
 };

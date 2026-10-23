@@ -11,11 +11,9 @@ const { applyScope } = require('./scope.service');
 const LARGE_AMOUNT_THRESHOLD = 50000;
 const DEFAULT_PAGE_LIMIT = 20;
 
-const startOfToday = () => {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
-};
+/** Midnight in the platform's timezone (Settings → General), not the server's. */
+const startOfToday = () => require('../utils/time').startOfDay(0); // eslint-disable-line global-require
+const { money } = require('../utils/money');
 
 /** `scope` (from scope.service) limits every figure to those accounts; null = whole platform. */
 const getStats = async (scope = null) => {
@@ -67,6 +65,44 @@ const listRequests = async ({ kind, status, page = 1, limit = DEFAULT_PAGE_LIMIT
  * the request is claimed only while it's still Pending, and a withdrawal
  * only debits a wallet that still holds the amount.
  */
+/**
+ * Settings → Commission → User Referral Bonus: when a player who signed up
+ * with another player's code gets their first deposit approved, the referrer
+ * is credited that percent of it — once per referred player.
+ */
+const payReferralBonus = async ({ player, deposit, reviewer }) => {
+  if (!player.referredBy) return;
+  const percent = Number((await Settings.findById('main').select('commissionRates').lean())?.commissionRates?.referral) || 0;
+  if (percent <= 0) return;
+  const earlier = await WalletRequest.exists({ user: player._id, kind: 'deposit', status: 'Approved', _id: { $ne: deposit._id } });
+  if (earlier) return;
+  const bonus = Math.round((deposit.amount * percent) / 100);
+  if (bonus <= 0) return;
+  const reference = `referral:${player._id}`;
+  // The reference makes it once-only even if two first deposits are approved together.
+  if (await Transaction.exists({ type: 'Referral Bonus', reference })) return;
+  const referrer = await User.findOneAndUpdate(
+    { _id: player.referredBy, status: 'active' },
+    { $inc: { walletBalance: bonus } },
+    { returnDocument: 'after' },
+  );
+  if (!referrer) return;
+  await Transaction.create({
+    user: referrer._id,
+    type: 'Referral Bonus',
+    amount: bonus,
+    reference,
+    status: 'Completed',
+    note: `Referral bonus — ${player.name || player.username} made their first deposit`,
+    createdBy: reviewer._id,
+  });
+  await notificationService.notifyWalletAdjustment({
+    user: referrer._id,
+    amount: bonus,
+    note: `Referral bonus: ${player.name || player.username} ne pehla deposit kiya`,
+  });
+};
+
 const decideRequest = async ({ requestId, approve, reviewer, reason = '', scope = null }) => {
   const pending = await WalletRequest.findById(requestId);
   if (!pending) throw ApiError.notFound('Wallet request not found');
@@ -115,11 +151,12 @@ const decideRequest = async ({ requestId, approve, reviewer, reason = '', scope 
     createdBy: reviewer._id,
   });
   await notificationService.notifyWalletDecision(request);
+  if (request.kind === 'deposit') await payReferralBonus({ player: user, deposit: request, reviewer });
 
   if (request.amount >= LARGE_AMOUNT_THRESHOLD) {
     await notificationService.notify({
       title: `Large ${request.kind} approved`,
-      body: `₹${request.amount} ${request.kind} approved for user ${user.username}`,
+      body: `${money(request.amount)} ${request.kind} approved for user ${user.username}`,
       category: 'wallet',
       emoji: '💰',
     });
@@ -323,10 +360,19 @@ const walletRules = async () => {
   return rules;
 };
 
+/** Withdrawals asked for today (pending or paid) — the "Max Withdrawal / Day" counts these. */
+const withdrawnToday = async (userId) => {
+  const [row] = await WalletRequest.aggregate([
+    { $match: { user: userId, kind: 'withdrawal', status: { $in: ['Pending', 'Approved'] }, createdAt: { $gte: startOfToday() } } },
+    { $group: { _id: null, total: { $sum: '$amount' } } },
+  ]);
+  return row?.total || 0;
+};
+
 /** The player's own wallet for the app: balance, pending requests and recent ledger rows. */
 const getPlayerWallet = async (player) => {
-  const [user, transactions, requests, wonTodayAgg, rules] = await Promise.all([
-    User.findById(player._id).select('walletBalance kyc'),
+  const [user, transactions, requests, wonTodayAgg, rules, withdrawn] = await Promise.all([
+    User.findById(player._id).select('walletBalance'),
     Transaction.find({ user: player._id }).sort({ createdAt: -1 }).limit(30),
     WalletRequest.find({ user: player._id }).sort({ createdAt: -1 }).limit(30),
     Transaction.aggregate([
@@ -334,9 +380,11 @@ const getPlayerWallet = async (player) => {
       { $group: { _id: null, total: { $sum: '$amount' } } },
     ]),
     walletRules(),
+    withdrawnToday(player._id),
   ]);
   // eslint-disable-next-line global-require
   const { openStake, pendingWithdrawal } = await require('./playerBet.service').reservedFor(player._id);
+  const processingHours = Number((await Settings.findById('main').select('walletRules').lean())?.walletRules?.processingHours) || null;
   return {
     balance: user.walletBalance,
     /** Stake held by open bets (not yet debited — they settle into the ledger). */
@@ -345,11 +393,15 @@ const getPlayerWallet = async (player) => {
     /** What can be bet or withdrawn now: balance minus open stakes and pending withdrawals. */
     available: Math.max(0, user.walletBalance - openStake - pendingWithdrawal),
     wonToday: wonTodayAgg[0]?.total || 0,
-    kyc: user.kyc,
     minDeposit: rules.minDeposit,
     maxDeposit: rules.maxDeposit,
     minWithdrawal: rules.minWithdrawal,
-    maxWithdrawal: rules.maxWithdrawal,
+    /** What can still be withdrawn today (Max Withdrawal / Day minus today's requests). */
+    maxWithdrawal: Math.max(0, rules.maxWithdrawal - withdrawn),
+    maxWithdrawalPerDay: rules.maxWithdrawal,
+    withdrawnToday: withdrawn,
+    /** Settings → Wallet Rules → Withdrawal Processing Time; null when not set. */
+    processingHours,
     transactions,
     requests,
   };
@@ -358,8 +410,8 @@ const getPlayerWallet = async (player) => {
 /**
  * Player raises a deposit (after paying the agent/platform via UPI etc.) or a
  * withdrawal from the app. Nothing moves until an agent / admin approves it
- * on the panel's Wallet page. Withdrawals need verified KYC and enough
- * balance not already tied up in pending withdrawals.
+ * on the panel's Wallet page. Withdrawals need enough balance not
+ * already tied up in open bets or pending withdrawals.
  */
 /** Max decoded size of a payment screenshot (the app says "Max 5MB"). */
 const MAX_PROOF_BYTES = 5 * 1024 * 1024;
@@ -375,7 +427,7 @@ const toProof = (file) => {
 const createPlayerRequest = async (player, { kind, amount, method, reference, proof }) => {
   const value = Math.round(Number(amount));
   const rules = await walletRules();
-  const rupees = (n) => `₹${n.toLocaleString('en-IN')}`;
+  const rupees = money;
   if (kind === 'deposit') {
     if (!String(reference || '').trim()) throw ApiError.badRequest('Transaction ID daalna zaroori hai');
     if (!proof?.data) throw ApiError.badRequest('Payment ka screenshot lagana zaroori hai');
@@ -384,9 +436,15 @@ const createPlayerRequest = async (player, { kind, amount, method, reference, pr
   }
   if (kind === 'withdrawal') {
     if (value < rules.minWithdrawal) throw ApiError.badRequest(`Minimum withdrawal ${rupees(rules.minWithdrawal)} hai`);
-    if (value > rules.maxWithdrawal) throw ApiError.badRequest(`Ek baar mein maximum withdrawal ${rupees(rules.maxWithdrawal)} hai`);
-    const user = await User.findById(player._id).select('walletBalance kyc');
-    if (user.kyc !== 'Verified') throw ApiError.forbidden('Withdrawal ke liye pehle KYC verify karwao');
+    const left = rules.maxWithdrawal - (await withdrawnToday(player._id));
+    if (value > left) {
+      throw ApiError.badRequest(
+        left > 0
+          ? `Aaj aap ${rupees(left)} tak aur withdraw kar sakte ho (daily limit ${rupees(rules.maxWithdrawal)})`
+          : `Aaj ki withdrawal limit ${rupees(rules.maxWithdrawal)} poori ho gayi — kal try karo`,
+      );
+    }
+    const user = await User.findById(player._id).select('walletBalance');
     // eslint-disable-next-line global-require
     const { openStake, pendingWithdrawal } = await require('./playerBet.service').reservedFor(player._id);
     if (value > user.walletBalance - openStake - pendingWithdrawal) {
@@ -407,7 +465,7 @@ const createPlayerRequest = async (player, { kind, amount, method, reference, pr
   if (value >= LARGE_AMOUNT_THRESHOLD) {
     await notificationService.notify({
       title: `Large ${kind} request`,
-      body: `₹${value} ${kind} requested by ${player.username}`,
+      body: `${money(value)} ${kind} requested by ${player.username}`,
       category: 'wallet',
       emoji: '💰',
     });

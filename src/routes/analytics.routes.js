@@ -14,5 +14,6 @@ router.get(
   analyticsController.series,
 );
 router.get('/highlights', analyticsController.highlights);
+router.get('/growth', analyticsController.growth);
 
 module.exports = router;

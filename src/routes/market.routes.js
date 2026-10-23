@@ -31,12 +31,13 @@ router.post(
     body('maxBet').optional().isFloat({ min: 0 }),
     body('maxExposure').optional().isFloat({ min: 0 }),
     body('runners').optional().isArray({ min: 2, max: 12 }).withMessage('A market needs 2 to 12 selections'),
+    body('status').optional().isIn(MARKET_STATUSES),
   ],
   validate,
   marketController.create,
 );
 
-router.post('/suspend-all', marketController.suspendAll);
+router.post('/suspend-all', [body('eventId').optional().isMongoId()], validate, marketController.suspendAll);
 
 router.patch(
   '/:id',

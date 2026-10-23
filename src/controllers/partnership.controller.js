@@ -28,4 +28,8 @@ const settlements = asyncHandler(async (_req, res) => {
   res.json({ settlements: await partnershipService.listSettlements() });
 });
 
-module.exports = { listPartners, createPartner, updatePartner, updatePartnerStatus, revenue, settlements };
+const paySettlement = asyncHandler(async (req, res) => {
+  res.json({ settlement: await partnershipService.paySettlement(req.params.id, req.user) });
+});
+
+module.exports = { listPartners, createPartner, updatePartner, updatePartnerStatus, revenue, settlements, paySettlement };
