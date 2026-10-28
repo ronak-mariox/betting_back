@@ -14,6 +14,7 @@ const { ENABLED_SPORTS } = require('../constants/admin');
 const { isStale } = require('./feedFreshness');
 const { money } = require('../utils/money');
 const { startOfDay } = require('../utils/time');
+const { inTransaction } = require('../utils/transaction');
 
 /** Cash-out offers keep a 5% margin, like the app's design copy implies. */
 const CASH_OUT_MARGIN = 0.95;
@@ -295,6 +296,17 @@ async function placeBet(player, { marketId, selection, stake, odds, line }) {
     status: 'Pending',
   });
 
+  // The market may have closed or been settled while the checks above ran; a bet
+  // left Pending on a settled market would never settle (and would hold up commission).
+  const [marketNow, eventNow] = await Promise.all([
+    Market.findById(market._id).select('status winner').lean(),
+    Event.findById(event._id).select('status').lean(),
+  ]);
+  if (marketNow?.status !== 'Active' || marketNow?.winner || !['Live', 'Upcoming'].includes(eventNow?.status)) {
+    await Bet.deleteOne({ _id: bet._id });
+    throw ApiError.badRequest('Yeh market abhi band hai');
+  }
+
   // Two bets sent at the same moment both pass the check above; re-check with
   // this bet counted and take it back if together they overdraw the wallet.
   // Bets are honoured oldest first, so of several racing bets the first ones that fit stay.
@@ -503,7 +515,7 @@ async function settleMarketResult(marketId, result) {
     if (runs === null) throw ApiError.badRequest('Is session ka result runs mein daalo (jaise 73)');
     return settleMarket(marketId, `${runs} runs`, {
       allowUnlisted: true,
-      isWin: (bet) => (bet.side === 'yes' ? runs >= bet.line : bet.side === 'no' ? runs < bet.line : false),
+      isWin: sessionWinsBy(runs),
     });
   }
   if (market.providerType === 'oddeven' && !/^(odd|even)$/i.test(String(result).trim()) && runs !== null) {
@@ -516,10 +528,76 @@ async function settleMarketResult(marketId, result) {
   return settleMarket(marketId, named ? named.name : result);
 }
 
+/** How a settled session market decides each bet: Yes wins at or above its line, No below it. */
+const sessionWinsBy = (runs) => (bet) => (bet.side === 'yes' ? runs >= bet.line : bet.side === 'no' ? runs < bet.line : false);
+
+/**
+ * Settles every still-open bet of a market already claimed with `winner`.
+ * Each bet's status, wallet change and ledger row are written together (one
+ * Mongo transaction), so a bet is never marked Won without its payout.
+ */
+async function payOpenBets(market, event, winner, winsBy) {
+  const openBets = await Bet.find({ market: market._id, status: 'Pending' });
+  const bets = [];
+  let won = 0;
+  let lost = 0;
+  for (const open of openBets) {
+    const isWin = winsBy ? winsBy(open) : open.selection === winner;
+    const net = isWin ? Math.round(open.amount * (open.odds - 1)) : -open.amount;
+    // eslint-disable-next-line no-await-in-loop
+    const bet = await inTransaction(async (session) => {
+      // Skips a bet the player cashed out in the meantime.
+      const claimed = await Bet.findOneAndUpdate(
+        { _id: open._id, status: 'Pending' },
+        { $set: { status: isWin ? 'Won' : 'Lost', payout: isWin ? Math.round(open.amount * open.odds) : 0, settledAt: new Date() } },
+        { returnDocument: 'after', session },
+      );
+      if (!claimed) return null;
+      const owner = await User.findOneAndUpdate(
+        { _id: claimed.user },
+        { $inc: { walletBalance: net } },
+        { returnDocument: 'after', session },
+      );
+      await Transaction.create(
+        [
+          {
+            user: claimed.user,
+            type: isWin ? 'Bet Win' : 'Bet Loss',
+            amount: net,
+            status: 'Completed',
+            relatedBet: claimed._id,
+            relatedEvent: event._id,
+            balanceAfter: owner ? owner.walletBalance : null,
+            note: `${event.name} — ${market.name}: ${winner}`,
+          },
+        ],
+        { session },
+      );
+      return claimed;
+    });
+    if (!bet) continue; // eslint-disable-line no-continue
+    bets.push(bet);
+    // eslint-disable-next-line no-await-in-loop
+    await notificationService.notifyBetSettled(bet, event.name);
+    if (isWin) won += 1;
+    else lost += 1;
+  }
+  return { bets, won, lost };
+}
+
 async function settleMarket(marketId, winner, { allowUnlisted = false, isWin: winsBy = null } = {}) {
   const existing = await Market.findById(marketId);
   if (!existing) throw ApiError.notFound('Market not found');
-  if (existing.winner) throw ApiError.conflict('Market already settled');
+  if (existing.winner) {
+    // Already claimed: finish any bets an interrupted settlement left open (same result, never a new one).
+    if (existing.winner !== 'Void' && (await Bet.exists({ market: existing._id, status: 'Pending' }))) {
+      const runs = /^(-?\d+) runs$/.exec(existing.winner);
+      const event = await Event.findById(existing.event);
+      const resumed = await payOpenBets(existing, event, existing.winner, runs ? sessionWinsBy(Number(runs[1])) : null);
+      return { market: existing, settled: resumed.bets.length, won: resumed.won, lost: resumed.lost, resumed: true };
+    }
+    throw ApiError.conflict('Market already settled');
+  }
   if (existing.betStyle === 'session' && !winsBy) {
     // A session market is settled by its runs (each bet against its own line).
     return settleMarketResult(marketId, winner);
@@ -537,38 +615,7 @@ async function settleMarket(marketId, winner, { allowUnlisted = false, isWin: wi
   );
   if (!market) throw ApiError.conflict('Market already settled');
 
-  const openBets = await Bet.find({ market: market._id, status: 'Pending' });
-  const bets = [];
-  let won = 0;
-  let lost = 0;
-  for (const open of openBets) {
-    const isWin = winsBy ? winsBy(open) : open.selection === winner;
-    const net = isWin ? Math.round(open.amount * (open.odds - 1)) : -open.amount;
-    // Skips a bet the player cashed out in the meantime.
-    // eslint-disable-next-line no-await-in-loop
-    const bet = await Bet.findOneAndUpdate(
-      { _id: open._id, status: 'Pending' },
-      { $set: { status: isWin ? 'Won' : 'Lost', payout: isWin ? Math.round(open.amount * open.odds) : 0, settledAt: new Date() } },
-      { returnDocument: 'after' },
-    );
-    if (!bet) continue; // eslint-disable-line no-continue
-    bets.push(bet);
-    // eslint-disable-next-line no-await-in-loop
-    await User.updateOne({ _id: bet.user }, { $inc: { walletBalance: net } });
-    // eslint-disable-next-line no-await-in-loop
-    await Transaction.create({
-      user: bet.user,
-      type: isWin ? 'Bet Win' : 'Bet Loss',
-      amount: net,
-      status: 'Completed',
-      relatedBet: bet._id,
-      note: `${event.name} — ${market.name}: ${winner}`,
-    });
-    // eslint-disable-next-line no-await-in-loop
-    await notificationService.notifyBetSettled(bet, event.name);
-    if (isWin) won += 1;
-    else lost += 1;
-  }
+  const { bets, won, lost } = await payOpenBets(market, event, winner, winsBy);
 
   const openStake = bets.reduce((sum, b) => sum + b.amount, 0);
   market.exposure = 0;
@@ -585,14 +632,18 @@ async function settleMarket(marketId, winner, { allowUnlisted = false, isWin: wi
 async function voidMarket(marketId, reason = '') {
   const existing = await Market.findById(marketId);
   if (!existing) throw ApiError.notFound('Market not found');
-  if (existing.winner) throw ApiError.conflict('Market already settled');
+  // Already voided: only an interrupted void's leftover open bets are released.
+  const resuming = existing.winner === 'Void' && (await Bet.exists({ market: existing._id, status: 'Pending' }));
+  if (existing.winner && !resuming) throw ApiError.conflict('Market already settled');
   const event = await Event.findById(existing.event);
 
-  const market = await Market.findOneAndUpdate(
-    { _id: marketId, winner: { $in: ['', null] } },
-    { $set: { winner: 'Void', settledAt: new Date(), status: 'Suspended', exposure: 0 } },
-    { returnDocument: 'after' },
-  );
+  const market = resuming
+    ? existing
+    : await Market.findOneAndUpdate(
+      { _id: marketId, winner: { $in: ['', null] } },
+      { $set: { winner: 'Void', settledAt: new Date(), status: 'Suspended', exposure: 0 } },
+      { returnDocument: 'after' },
+    );
   if (!market) throw ApiError.conflict('Market already settled');
 
   const openBets = await Bet.find({ market: market._id, status: 'Pending' });
@@ -622,7 +673,30 @@ async function voidMarket(marketId, reason = '') {
   return { market, voided, released };
 }
 
+/**
+ * Markets that were claimed (winner set) but still have open bets — a
+ * settlement or void interrupted part-way. Finishes them with the result
+ * already recorded; run by the commission scheduler before it pays a match.
+ */
+async function finishInterruptedSettlements() {
+  const marketIds = await Bet.distinct('market', { status: 'Pending' });
+  if (!marketIds.length) return 0;
+  const stuck = await Market.find({ _id: { $in: marketIds }, winner: { $nin: ['', null] } }).select('_id winner').lean();
+  for (const market of stuck) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      if (market.winner === 'Void') await voidMarket(market._id, 'no result');
+      // eslint-disable-next-line no-await-in-loop
+      else await settleMarket(market._id, market.winner);
+    } catch (err) {
+      console.error('finishing settlement failed:', err.message); // eslint-disable-line no-console
+    }
+  }
+  return stuck.length;
+}
+
 module.exports = {
+  finishInterruptedSettlements,
   runnersFor,
   reservedFor,
   availableFor,

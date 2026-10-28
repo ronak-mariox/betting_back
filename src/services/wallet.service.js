@@ -4,6 +4,8 @@ const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const WalletRequest = require('../models/WalletRequest');
 const Payment = require('../models/Payment');
+const FundTransfer = require('../models/FundTransfer');
+const { inTransaction } = require('../utils/transaction');
 const ApiError = require('../utils/ApiError');
 const notificationService = require('./notification.service');
 const { applyScope } = require('./scope.service');
@@ -165,124 +167,281 @@ const decideRequest = async ({ requestId, approve, reviewer, reason = '', scope 
   return request;
 };
 
-const manualEntry = async ({ actor, userId, action, amount, note }) => {
-  const user = await User.findById(userId);
-  if (!user) throw ApiError.notFound('User not found');
+/**
+ * A super-admin correction: credit, debit or adjustment (either direction).
+ * Every entry is its own ledger row with the reason recorded — old rows are
+ * never edited (see utils/immutable.js).
+ */
+const manualEntry = async ({ actor, userId, action, amount, note, direction }) => {
+  const normalizedAmount = Math.round(Number(amount) * 100) / 100;
+  const reason = String(note || '').trim();
+  if (!reason) throw ApiError.badRequest('Write the reason for this entry');
+  const debit = action === 'Debit' || (action === 'Adjustment' && direction === 'debit');
+  const delta = debit ? -normalizedAmount : normalizedAmount;
 
-  const normalizedAmount = Number(amount);
-  const delta = action === 'Debit' ? -normalizedAmount : normalizedAmount;
-  if (action === 'Debit' && user.walletBalance < normalizedAmount) {
-    throw ApiError.badRequest('User has insufficient wallet balance');
-  }
-
-  user.walletBalance += delta;
-  await user.save();
-
-  const txn = await Transaction.create({
-    user: user._id,
-    type: 'Adjustment',
-    amount: delta,
-    status: 'Completed',
-    note: note || `Manual ${action}`,
-    createdBy: actor._id,
+  const { user, txn } = await inTransaction(async (session) => {
+    const updated = await User.findOneAndUpdate(
+      { _id: userId, ...(debit ? { walletBalance: { $gte: normalizedAmount } } : {}) },
+      { $inc: { walletBalance: delta } },
+      { returnDocument: 'after', session },
+    );
+    if (!updated) {
+      if (!(await User.exists({ _id: userId }).session(session))) throw ApiError.notFound('User not found');
+      throw ApiError.badRequest('User has insufficient wallet balance');
+    }
+    const [row] = await Transaction.create(
+      [
+        {
+          user: updated._id,
+          type: 'Adjustment',
+          amount: delta,
+          method: `Manual ${action}`,
+          status: 'Completed',
+          note: reason,
+          reason,
+          balanceAfter: updated.walletBalance,
+          createdBy: actor._id,
+        },
+      ],
+      { session },
+    );
+    return { user: updated, txn: row };
   });
-  await notificationService.notifyWalletAdjustment({ user: user._id, amount: delta, note });
+  await notificationService.notifyWalletAdjustment({ user: user._id, amount: delta, note: reason });
 
   return { user, transaction: txn };
 };
 
+/** Super-admin: move money between any two accounts (both ledger rows share one reference). */
 const transfer = async ({ actor, fromUserId, toUserId, amount, note }) => {
   if (String(fromUserId) === String(toUserId)) throw ApiError.badRequest('Cannot transfer to the same account');
   const normalizedAmount = Number(amount);
+  const reason = String(note || '').trim();
+  if (!reason) throw ApiError.badRequest('Write the reason for this transfer');
 
-  const [fromUser, toUser] = await Promise.all([User.findById(fromUserId), User.findById(toUserId)]);
-  if (!fromUser || !toUser) throw ApiError.notFound('User not found');
-  if (fromUser.walletBalance < normalizedAmount) throw ApiError.badRequest('Sender has insufficient wallet balance');
-
-  fromUser.walletBalance -= normalizedAmount;
-  toUser.walletBalance += normalizedAmount;
-  await Promise.all([fromUser.save(), toUser.save()]);
-
-  const reference = new mongoose.Types.ObjectId().toString();
-  const [debitTxn, creditTxn] = await Promise.all([
-    Transaction.create({
-      user: fromUser._id,
-      type: 'Adjustment',
-      amount: -normalizedAmount,
-      reference,
-      status: 'Completed',
-      note: note || `Transfer to ${toUser.username}`,
-      createdBy: actor._id,
-    }),
-    Transaction.create({
-      user: toUser._id,
-      type: 'Adjustment',
-      amount: normalizedAmount,
-      reference,
-      status: 'Completed',
-      note: note || `Transfer from ${fromUser.username}`,
-      createdBy: actor._id,
-    }),
-  ]);
+  const result = await inTransaction(async (session) => {
+    const toUser = await User.findById(toUserId).session(session);
+    if (!toUser) throw ApiError.notFound('User not found');
+    const fromUser = await User.findOneAndUpdate(
+      { _id: fromUserId, walletBalance: { $gte: normalizedAmount } },
+      { $inc: { walletBalance: -normalizedAmount } },
+      { returnDocument: 'after', session },
+    );
+    if (!fromUser) {
+      if (!(await User.exists({ _id: fromUserId }).session(session))) throw ApiError.notFound('User not found');
+      throw ApiError.badRequest('Sender has insufficient wallet balance');
+    }
+    const credited = await User.findOneAndUpdate(
+      { _id: toUser._id },
+      { $inc: { walletBalance: normalizedAmount } },
+      { returnDocument: 'after', session },
+    );
+    const reference = `TRF${new mongoose.Types.ObjectId().toString().slice(-8).toUpperCase()}`;
+    const transactions = await Transaction.create(
+      [
+        {
+          user: fromUser._id,
+          type: 'Adjustment',
+          amount: -normalizedAmount,
+          method: 'Fund Transfer',
+          reference,
+          status: 'Completed',
+          note: reason,
+          reason,
+          counterparty: credited._id,
+          balanceAfter: fromUser.walletBalance,
+          createdBy: actor._id,
+        },
+        {
+          user: credited._id,
+          type: 'Adjustment',
+          amount: normalizedAmount,
+          method: 'Fund Transfer',
+          reference,
+          status: 'Completed',
+          note: reason,
+          reason,
+          counterparty: fromUser._id,
+          balanceAfter: credited.walletBalance,
+          createdBy: actor._id,
+        },
+      ],
+      { session, ordered: true },
+    );
+    return { fromUser, toUser: credited, transactions };
+  });
 
   await Promise.all([
-    notificationService.notifyWalletAdjustment({ user: fromUser._id, amount: -normalizedAmount, note }),
-    notificationService.notifyWalletAdjustment({ user: toUser._id, amount: normalizedAmount, note }),
+    notificationService.notifyWalletAdjustment({ user: result.fromUser._id, amount: -normalizedAmount, note: reason }),
+    notificationService.notifyWalletAdjustment({ user: result.toUser._id, amount: normalizedAmount, note: reason }),
   ]);
 
-  return { fromUser, toUser, transactions: [debitTxn, creditTxn] };
+  return result;
 };
+
+/** What the panel shows for one transfer attempt. */
+const transferView = (t) => ({
+  _id: t._id,
+  reference: t.reference,
+  amount: t.amount,
+  status: t.status,
+  failureReason: t.failureReason,
+  note: t.note,
+  from: t.from,
+  to: t.to,
+  balanceAfter: t.balanceAfter,
+  createdAt: t.createdAt,
+  completedAt: t.completedAt,
+});
 
 /**
  * A staff member moves money from their own wallet to an account in their
- * downline (an agent's float, a player's balance). The debit only happens
- * while the sender still holds the amount, so two transfers sent together
- * can't overdraw it.
+ * downline (an agent's float, a player's balance). Every attempt is recorded
+ * (FundTransfer) — failed ones too, with the reason. The debit, the credit
+ * and both ledger rows are applied together or not at all, and a repeated
+ * `idempotencyKey` (a double click, a retry) returns the first result instead
+ * of moving money again.
  */
-const fundTransfer = async ({ actor, toUserId, amount, note, scope }) => {
-  const value = Math.round(Number(amount));
-  if (!(value > 0)) throw ApiError.badRequest('Enter an amount to transfer');
+const fundTransfer = async ({ actor, toUserId, amount, note, scope, idempotencyKey = null }) => {
+  const value = Number(amount);
+  if (!Number.isInteger(value) || value <= 0) throw ApiError.badRequest('Enter a whole rupee amount to transfer');
   if (String(toUserId) === String(actor._id)) throw ApiError.badRequest('Choose an account other than your own');
   if (scope && !scope.some((id) => String(id) === String(toUserId))) {
     throw ApiError.forbidden('You can only transfer to accounts in your own network');
   }
+
+  /** The same form sent again (double click, retry): answer with the first attempt's outcome, never move money twice. */
+  const replay = (earlier) => {
+    if (earlier.status === 'Pending') throw ApiError.conflict('This transfer is already being processed');
+    if (earlier.status !== 'Completed') throw ApiError.badRequest(earlier.failureReason || `This transfer was ${earlier.status.toLowerCase()}`);
+    return { ...transferView(earlier), balance: earlier.balanceAfter, duplicate: true };
+  };
+  if (idempotencyKey) {
+    const earlier = await FundTransfer.findOne({ from: actor._id, idempotencyKey }).populate('to', 'name username role');
+    if (earlier) return replay(earlier);
+  }
+
   const receiver = await User.findById(toUserId).select('username name role status');
-  if (!receiver) throw ApiError.notFound('Account not found');
-  if (receiver.status !== 'active') throw ApiError.badRequest('That account is suspended');
-
-  const sender = await User.findOneAndUpdate(
-    { _id: actor._id, walletBalance: { $gte: value } },
-    { $inc: { walletBalance: -value } },
-    { returnDocument: 'after' },
-  );
-  if (!sender) throw ApiError.badRequest('Your wallet balance is not enough for this transfer');
-  await User.updateOne({ _id: receiver._id }, { $inc: { walletBalance: value } });
-
   const reference = `TRF${new mongoose.Types.ObjectId().toString().slice(-8).toUpperCase()}`;
-  await Transaction.create([
-    {
-      user: sender._id,
-      type: 'Adjustment',
-      amount: -value,
-      method: 'Fund Transfer',
+  let record;
+  try {
+    record = await FundTransfer.create({
       reference,
-      status: 'Completed',
-      note: note || `Transfer to ${receiver.name || receiver.username}`,
-      createdBy: actor._id,
-    },
-    {
-      user: receiver._id,
-      type: 'Adjustment',
+      from: actor._id,
+      to: receiver?._id ?? null,
       amount: value,
-      method: 'Fund Transfer',
-      reference,
-      status: 'Completed',
-      note: note || `Transfer from ${sender.name || sender.username}`,
-      createdBy: actor._id,
-    },
-  ]);
+      note: note || '',
+      idempotencyKey,
+    });
+  } catch (err) {
+    // The same form was submitted twice at once: the first one wins.
+    if (err?.code === 11000 && idempotencyKey) {
+      const earlier = await FundTransfer.findOne({ from: actor._id, idempotencyKey }).populate('to', 'name username role');
+      return replay(earlier);
+    }
+    throw err;
+  }
+
+  const fail = async (status, message) => {
+    await FundTransfer.updateOne({ _id: record._id }, { $set: { status, failureReason: message } });
+  };
+
+  if (!receiver) {
+    await fail('Failed', 'Account not found');
+    throw ApiError.notFound('Account not found');
+  }
+  if (receiver.status !== 'active') {
+    await fail('Cancelled', 'Receiving account is suspended');
+    throw ApiError.badRequest('That account is suspended');
+  }
+
+  let sender;
+  try {
+    sender = await inTransaction(async (session) => {
+      const debited = await User.findOneAndUpdate(
+        { _id: actor._id, walletBalance: { $gte: value } },
+        { $inc: { walletBalance: -value } },
+        { returnDocument: 'after', session },
+      );
+      if (!debited) throw ApiError.badRequest('Your wallet balance is not enough for this transfer');
+      const credited = await User.findOneAndUpdate(
+        { _id: receiver._id, status: 'active' },
+        { $inc: { walletBalance: value } },
+        { returnDocument: 'after', session },
+      );
+      if (!credited) throw ApiError.badRequest('That account is no longer active');
+      await Transaction.create(
+        [
+          {
+            user: debited._id,
+            type: 'Adjustment',
+            amount: -value,
+            method: 'Fund Transfer',
+            reference,
+            status: 'Completed',
+            note: note || `Transfer to ${receiver.name || receiver.username}`,
+            counterparty: receiver._id,
+            balanceAfter: debited.walletBalance,
+            createdBy: actor._id,
+          },
+          {
+            user: receiver._id,
+            type: 'Adjustment',
+            amount: value,
+            method: 'Fund Transfer',
+            reference,
+            status: 'Completed',
+            note: note || `Transfer from ${debited.name || debited.username}`,
+            counterparty: debited._id,
+            balanceAfter: credited.walletBalance,
+            createdBy: actor._id,
+          },
+        ],
+        { session, ordered: true },
+      );
+      return debited;
+    });
+  } catch (err) {
+    await fail('Failed', err instanceof ApiError ? err.message : 'Transfer could not be completed').catch(() => null);
+    throw err;
+  }
+
+  const completedAt = new Date();
+  await FundTransfer.updateOne(
+    { _id: record._id },
+    { $set: { status: 'Completed', balanceAfter: sender.walletBalance, completedAt } },
+  );
   await notificationService.notifyWalletAdjustment({ user: receiver._id, amount: value, from: sender.name || sender.username, note });
-  return { reference, amount: value, balance: sender.walletBalance, to: { _id: receiver._id, name: receiver.name, username: receiver.username, role: receiver.role } };
+  return {
+    reference,
+    amount: value,
+    status: 'Completed',
+    balance: sender.walletBalance,
+    createdAt: record.createdAt,
+    to: { _id: receiver._id, name: receiver.name, username: receiver.username, role: receiver.role },
+  };
+};
+
+/**
+ * Transfer history: what the actor sent and received, or — for super-admin
+ * and with `all` — every transfer in the actor's network. Failed and
+ * cancelled attempts are included.
+ */
+const listTransfers = async ({ actor, scope = null, all = false, status, page = 1, limit = DEFAULT_PAGE_LIMIT }) => {
+  const filter = all && scope === null ? {} : all ? { from: { $in: scope } } : { $or: [{ from: actor._id }, { to: actor._id }] };
+  if (status) filter.status = status;
+  const skip = (Number(page) - 1) * Number(limit);
+  const [items, total] = await Promise.all([
+    FundTransfer.find(filter)
+      .populate('from', 'name username role')
+      .populate('to', 'name username role')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(Number(limit))
+      .lean(),
+    FundTransfer.countDocuments(filter),
+  ]);
+  return { items: items.map(transferView), total, page: Number(page), limit: Number(limit) };
 };
 
 const listPayments = async ({ page = 1, limit = DEFAULT_PAGE_LIMIT }) => {
@@ -347,7 +506,12 @@ const listDisbursements = async ({ page = 1, limit = DEFAULT_PAGE_LIMIT }) => {
 };
 
 /** Used until the admin saves Wallet Rules in Settings. */
-const DEFAULT_WALLET_RULES = { minDeposit: 100, maxDeposit: 500000, minWithdrawal: 500, maxWithdrawal: 200000 };
+/**
+ * `reservePercent`: the share of the wallet balance that always stays in the
+ * wallet and can't be withdrawn (Settings → Wallet Rules → Wallet Reserve %),
+ * e.g. 10 = players withdraw at most 90%. 0 = no reserve.
+ */
+const DEFAULT_WALLET_RULES = { minDeposit: 100, maxDeposit: 500000, minWithdrawal: 500, maxWithdrawal: 200000, reservePercent: 0 };
 
 /** Deposit / withdrawal limits the admin set on the Settings page. */
 const walletRules = async () => {
@@ -357,7 +521,18 @@ const walletRules = async () => {
     const value = Number(settings?.walletRules?.[key]);
     if (Number.isFinite(value) && value > 0) rules[key] = value;
   }
+  rules.reservePercent = Math.min(99, rules.reservePercent);
   return rules;
+};
+
+/**
+ * What a player can withdraw right now: the balance not held by open bets or
+ * pending withdrawals, minus the reserve that always stays in the wallet
+ * (reservePercent% of the balance).
+ */
+const withdrawableFor = ({ balance, openStake, pendingWithdrawal, reservePercent }) => {
+  const mustStay = Math.ceil((balance * reservePercent) / 100);
+  return Math.max(0, Math.floor(balance - openStake - pendingWithdrawal - mustStay));
 };
 
 /** Withdrawals asked for today (pending or paid) — the "Max Withdrawal / Day" counts these. */
@@ -392,6 +567,10 @@ const getPlayerWallet = async (player) => {
     pendingWithdrawal,
     /** What can be bet or withdrawn now: balance minus open stakes and pending withdrawals. */
     available: Math.max(0, user.walletBalance - openStake - pendingWithdrawal),
+    /** What can be withdrawn now: `available` less the reserve that stays in the wallet. */
+    withdrawable: withdrawableFor({ balance: user.walletBalance, openStake, pendingWithdrawal, reservePercent: rules.reservePercent }),
+    /** Settings → Wallet Rules → Wallet Reserve %: the share of the balance that can't be withdrawn (0 = none). */
+    reservePercent: rules.reservePercent,
     wonToday: wonTodayAgg[0]?.total || 0,
     minDeposit: rules.minDeposit,
     maxDeposit: rules.maxDeposit,
@@ -450,6 +629,17 @@ const createPlayerRequest = async (player, { kind, amount, method, reference, pr
     if (value > user.walletBalance - openStake - pendingWithdrawal) {
       throw ApiError.badRequest('Wallet mein itna balance nahi hai');
     }
+    const withdrawable = withdrawableFor({
+      balance: user.walletBalance,
+      openStake,
+      pendingWithdrawal,
+      reservePercent: rules.reservePercent,
+    });
+    if (value > withdrawable) {
+      throw ApiError.badRequest(
+        `Wallet balance ka ${rules.reservePercent}% hamesha wallet mein rehta hai — abhi maximum ${rupees(withdrawable)} nikal sakte ho`,
+      );
+    }
   }
   const created = await WalletRequest.create({
     user: player._id,
@@ -492,9 +682,11 @@ module.exports = {
   listRequests,
   decideRequest,
   fundTransfer,
+  listTransfers,
   manualEntry,
   transfer,
   listPayments,
   createPayment,
   listDisbursements,
+  walletRules,
 };

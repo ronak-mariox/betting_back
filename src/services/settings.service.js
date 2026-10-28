@@ -93,6 +93,13 @@ function cleanSection(section, updates, current) {
       throw ApiError.badRequest('Support email is not a valid email address');
     }
   }
+  if (section === 'walletRules' && out.reservePercent !== undefined) {
+    const percent = Number(out.reservePercent);
+    if (!Number.isFinite(percent) || percent < 0 || percent > 99) {
+      throw ApiError.badRequest('Wallet Reserve % must be between 0 and 99');
+    }
+    out.reservePercent = percent;
+  }
   if (section === 'sms' && out.provider !== undefined && !SMS_PROVIDERS.includes(out.provider)) {
     throw ApiError.badRequest(`SMS provider must be one of ${SMS_PROVIDERS.filter(Boolean).join(', ')}`);
   }
@@ -203,6 +210,37 @@ const getBranding = async () => {
   };
 };
 
+/** Deposit QR / UPI details as the app shows them; empty fields when none are set. */
+const getPaymentDetails = async () => {
+  const details = (await Settings.findById('main').select('paymentDetails').lean())?.paymentDetails || {};
+  return {
+    qrImage: details.qrImage || '',
+    upiId: details.upiId || '',
+    payeeName: details.payeeName || '',
+    note: details.note || '',
+    updatedAt: details.updatedAt || null,
+  };
+};
+
+/**
+ * Super Admin changes the deposit QR / UPI details. `qrImage` is a data URI;
+ * '' removes it, undefined keeps the current one. Open Deposit screens
+ * refetch through the config-changed event.
+ */
+const updatePaymentDetails = async ({ qrImage, upiId, payeeName, note }) => {
+  const current = await getPaymentDetails();
+  const next = {
+    qrImage: qrImage === undefined ? current.qrImage : String(qrImage || ''),
+    upiId: upiId === undefined ? current.upiId : String(upiId || '').trim(),
+    payeeName: payeeName === undefined ? current.payeeName : String(payeeName || '').trim(),
+    note: note === undefined ? current.note : String(note || '').trim(),
+    updatedAt: new Date(),
+  };
+  await Settings.findByIdAndUpdate('main', { $set: { paymentDetails: next } }, { upsert: true });
+  await saved();
+  return next;
+};
+
 const updateSection = async (section, updates) => {
   if (!SECTIONS.includes(section)) throw ApiError.badRequest(`Unknown settings section: ${section}`);
   const stored = (await Settings.findById('main').lean())?.[section] || {};
@@ -263,6 +301,8 @@ const recordApiLatency = async (keyId, latency) => {
 module.exports = {
   getSettings,
   updateSection,
+  getPaymentDetails,
+  updatePaymentDetails,
   addApiKey,
   updateApiKey,
   deleteApiKey,

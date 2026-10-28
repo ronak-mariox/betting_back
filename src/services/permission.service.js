@@ -26,6 +26,35 @@ async function seedDefaults() {
   );
 }
 
+/**
+ * Product-default changes made after a database was seeded. Each is applied
+ * once per role and remembered, so a later change on the Permissions page is
+ * never overwritten on restart.
+ */
+const DEFAULT_UPGRADES = [
+  // Client requirement (2026-10-27): agents transfer from their wallet to their own clients.
+  { id: '2026-10-agent-fund-transfer', roleKey: 'agent', grants: { 'finance:fundTransfer': 'EVX' } },
+  // …and see the commission they earn (the Complete Match settlement and the Commission page).
+  { id: '2026-10-agent-commission-view', roleKey: 'agent', grants: { 'finance:commission': 'EV' } },
+  // Support tickets removed from the staff panels (players still raise them from the app).
+  ...['superAgent', 'agent', 'franchise'].map((roleKey) => ({
+    id: '2026-10-staff-no-tickets',
+    roleKey,
+    grants: { 'support:raiseTicket': '', 'support:viewTickets': '' },
+  })),
+];
+
+async function applyDefaultUpgrades() {
+  for (const upgrade of DEFAULT_UPGRADES) {
+    const $set = Object.fromEntries(Object.entries(upgrade.grants).map(([key, value]) => [`grants.${key}`, value]));
+    // eslint-disable-next-line no-await-in-loop
+    await Permission.updateOne(
+      { roleKey: upgrade.roleKey, appliedUpgrades: { $ne: upgrade.id } },
+      { $set, $addToSet: { appliedUpgrades: upgrade.id } },
+    );
+  }
+}
+
 /** The full matrix (groups + names + live grants) for one role key, shaped like permissionsData.ts. */
 async function getMatrixForRoleKey(roleKey) {
   if (!ROLE_KEYS.includes(roleKey)) throw ApiError.badRequest('Unknown role key');
@@ -110,6 +139,7 @@ async function checkerFor(role) {
 }
 
 module.exports = {
+  applyDefaultUpgrades,
   checkerFor,
   seedDefaults,
   getMatrixForRoleKey,

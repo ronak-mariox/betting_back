@@ -15,6 +15,12 @@ const settingsSchema = new Schema(
     smtp: { type: Schema.Types.Mixed, default: {} },
     sms: { type: Schema.Types.Mixed, default: {} },
     brand: { type: Schema.Types.Mixed, default: {} },
+    /**
+     * Where players pay a deposit, set by the Super Admin (Settings → Payment
+     * Details) and shown on the app's Deposit screen: { qrImage (data URI),
+     * upiId, payeeName, note, updatedAt }.
+     */
+    paymentDetails: { type: Schema.Types.Mixed, default: {} },
     apiKeys: {
       type: [
         {

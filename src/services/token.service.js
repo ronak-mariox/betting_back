@@ -99,6 +99,7 @@ const revokeAllForUser = async (userId) => {
 };
 
 module.exports = {
+  hashToken,
   signAccessToken,
   verifyAccessToken,
   issueRefreshToken,

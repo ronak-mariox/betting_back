@@ -97,6 +97,7 @@ async function runBootstrap() {
   await ensureRootSuperAdmin();
   await seedDemoHierarchy();
   await permissionService.seedDefaults();
+  await permissionService.applyDefaultUpgrades();
   try {
     await seedAdminDemoData();
   } catch (err) {

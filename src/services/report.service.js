@@ -82,13 +82,25 @@ const REPORT_BUILDERS = {
       status: r.status,
     }));
   },
-  commission: async ({ scope }) => {
-    const rows = await Commission.find(applyScope({}, scope, 'entity')).populate('entity', 'username role').sort({ period: -1 }).limit(1000).lean();
+  commission: async ({ from, to, scope }) => {
+    const match = applyScope({}, scope, 'entity');
+    const settled = dateFilter(from, to);
+    if (settled) match.settledAt = settled;
+    const rows = await Commission.find(match)
+      .populate('entity', 'username role')
+      .populate('event', 'name')
+      .populate('player', 'username')
+      .sort({ settledAt: -1, createdAt: -1 })
+      .limit(1000)
+      .lean();
     return rows.map((r) => ({
-      period: r.period,
-      entity: r.entity?.username || '',
+      date: r.settledAt || r.createdAt,
+      match: r.event?.name || '',
+      player: r.player?.username || '',
+      paidTo: r.entity?.username || '',
       level: r.level,
-      turnover: r.turnover,
+      kind: r.kind,
+      base: r.turnover,
       rate: r.rate,
       commission: r.commission,
       status: r.status,
@@ -172,6 +184,16 @@ const ROLLUPS = {
       if (outcome) bucket[outcome] += 1;
     },
   },
+  // Commission: what was paid out, split by session and match.
+  commission: {
+    start: () => ({ payouts: 0, session: 0, match: 0, total: 0 }),
+    add: (bucket, row) => {
+      const amount = Number(row.commission) || 0;
+      bucket.payouts += 1;
+      bucket[row.kind === 'Match' ? 'match' : 'session'] += amount;
+      bucket.total += amount;
+    },
+  },
   // Requests: only approved ones moved money; the rest are counted, not summed.
   wallet: {
     start: () => ({ requests: 0, depositsApproved: 0, withdrawalsApproved: 0, pending: 0, rejected: 0 }),
@@ -186,7 +208,7 @@ const ROLLUPS = {
 
 /**
  * Rolls a dated report up into one row per period. Reports without a date
- * column (users, commission, exposure) have nothing to group and are
+ * column (users, exposure) have nothing to group and are
  * returned as they are.
  */
 function grouped(kind, rows, groupBy) {

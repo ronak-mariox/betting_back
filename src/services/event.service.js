@@ -30,8 +30,9 @@ const createEvent = async ({ sport, league, name, emoji, startTime }) => {
 
 const updateEventStatus = async ({ id, status }) => {
   const before = await Event.findById(id).select('status');
-  // A finished match stays finished: reopening it would let players bet on a known result.
-  if (['Completed', 'Settled'].includes(before?.status) && ['Live', 'Upcoming'].includes(status)) {
+  // A finished match stays finished: reopening it (even via Suspended) would let players bet on a
+  // known result after its commission is paid. The only move left is Completed → Settled.
+  if (['Completed', 'Settled'].includes(before?.status) && !(before.status === 'Completed' && status === 'Settled')) {
     throw ApiError.conflict(`This match is already ${before.status.toLowerCase()} and can't be reopened`);
   }
   // Feed events: the admin holds or releases betting; Live / Upcoming always comes from the feed.

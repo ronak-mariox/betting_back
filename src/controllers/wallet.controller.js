@@ -73,8 +73,31 @@ const fundTransfer = asyncHandler(async (req, res) => {
     amount: req.body.amount,
     note: req.body.note,
     scope: await scopeFor(req.user),
+    idempotencyKey: req.body.idempotencyKey || req.get('Idempotency-Key') || null,
   });
-  res.status(201).json(result);
+  if (!result.duplicate) {
+    await auditService.record({
+      actor: req.user,
+      action: 'fund_transfer',
+      target: result.to?._id,
+      req,
+      metadata: { amount: result.amount, reference: result.reference },
+    });
+  }
+  res.status(result.duplicate ? 200 : 201).json(result);
+});
+
+const listTransfers = asyncHandler(async (req, res) => {
+  res.json(
+    await walletService.listTransfers({
+      actor: req.user,
+      scope: await scopeFor(req.user),
+      all: req.query.all === '1',
+      status: req.query.status,
+      page: req.query.page,
+      limit: req.query.limit,
+    }),
+  );
 });
 
 const approveRequest = decide(true);
@@ -82,12 +105,18 @@ const rejectRequest = decide(false);
 
 
 const manualEntry = asyncHandler(async (req, res) => {
-  const { userId, toUserId, action, amount, note } = req.body;
-  if (action === 'Transfer') {
-    const result = await walletService.transfer({ actor: req.user, fromUserId: userId, toUserId, amount, note });
-    return res.json(result);
-  }
-  const result = await walletService.manualEntry({ actor: req.user, userId, action, amount, note });
+  const { userId, toUserId, action, amount, note, direction } = req.body;
+  const result =
+    action === 'Transfer'
+      ? await walletService.transfer({ actor: req.user, fromUserId: userId, toUserId, amount, note })
+      : await walletService.manualEntry({ actor: req.user, userId, action, amount, note, direction });
+  await auditService.record({
+    actor: req.user,
+    action: 'wallet_manual_entry',
+    target: userId,
+    req,
+    metadata: { action, amount: Number(amount), reason: note, ...(direction ? { direction } : {}), ...(toUserId ? { toUserId } : {}) },
+  });
   return res.json(result);
 });
 
@@ -121,6 +150,7 @@ module.exports = {
   requestProof,
   approveRequest,
   fundTransfer,
+  listTransfers,
   rejectRequest,
   manualEntry,
   listPayments,

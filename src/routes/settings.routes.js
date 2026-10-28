@@ -29,6 +29,25 @@ router.post(
   settingsController.testSms,
 );
 
+/** Deposit QR / UPI shown on the app's Deposit screen. */
+router.put(
+  '/payment-details',
+  [
+    body('qrImage')
+      .optional()
+      .custom((value) => value === '' || (typeof value === 'string' && /^data:image\/(png|jpe?g|webp);base64,/.test(value) && value.length <= 2_800_000))
+      .withMessage('Upload the QR as a PNG, JPG or WebP image under 2MB'),
+    body('upiId')
+      .optional()
+      .custom((value) => value === '' || /^[\w.-]{2,}@[a-zA-Z]{2,}$/.test(String(value).trim()))
+      .withMessage('Enter a valid UPI ID, e.g. name@bank'),
+    body('payeeName').optional().isString().trim().isLength({ max: 80 }),
+    body('note').optional().isString().trim().isLength({ max: 200 }),
+  ],
+  validate,
+  settingsController.updatePaymentDetails,
+);
+
 router.patch('/:section', [param('section').isIn(SECTIONS)], validate, settingsController.updateSection);
 
 module.exports = router;

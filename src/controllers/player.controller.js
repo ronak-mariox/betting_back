@@ -8,6 +8,11 @@ const wallet = asyncHandler(async (req, res) => {
   res.json(await walletService.getPlayerWallet(req.user));
 });
 
+const depositDetails = asyncHandler(async (_req, res) => {
+  // eslint-disable-next-line global-require
+  res.json({ paymentDetails: await require('../services/settings.service').getPaymentDetails() });
+});
+
 const walletRequest = asyncHandler(async (req, res) => {
   const request = await walletService.createPlayerRequest(req.user, req.body);
   res.status(201).json({ request, wallet: await walletService.getPlayerWallet(req.user) });
@@ -56,6 +61,7 @@ const statement = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  depositDetails,
   wallet,
   walletRequest,
   matches,

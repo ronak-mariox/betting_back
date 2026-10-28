@@ -29,8 +29,8 @@ const PERMISSION_GROUPS = [
       { key: 'walletBalance', name: 'Wallet Balance', description: 'View & manage wallet balance', grants: { superAgent: 'EVX', agent: 'EV', franchise: 'EV' } },
       { key: 'deposit', name: 'Deposit', description: 'Initiate deposit requests', grants: { superAgent: 'EVX', agent: 'EVX', franchise: '' } },
       { key: 'withdrawal', name: 'Withdrawal', description: 'Initiate withdrawal requests', grants: { superAgent: 'EVX', agent: 'EVX', franchise: '' } },
-      { key: 'fundTransfer', name: 'Fund Transfer', description: 'Transfer funds to sub-accounts', grants: { superAgent: 'EVX', agent: '', franchise: '' } },
-      { key: 'commission', name: 'Commission', description: 'View commission earnings', grants: { superAgent: 'EV', agent: '', franchise: 'EV' } },
+      { key: 'fundTransfer', name: 'Fund Transfer', description: 'Transfer funds to sub-accounts', grants: { superAgent: 'EVX', agent: 'EVX', franchise: '' } },
+      { key: 'commission', name: 'Commission', description: 'View commission earnings', grants: { superAgent: 'EV', agent: 'EV', franchise: 'EV' } },
     ],
   },
   {
@@ -76,8 +76,9 @@ const PERMISSION_GROUPS = [
     name: 'Support',
     permissions: [
       { key: 'contactSupport', name: 'Contact Support', description: 'Access support channels', grants: { superAgent: 'EV', agent: 'EV', franchise: 'EV' } },
-      { key: 'raiseTicket', name: 'Raise Ticket', description: 'Submit support tickets', grants: { superAgent: 'EVX', agent: 'EVX', franchise: '' } },
-      { key: 'viewTickets', name: 'View Tickets', description: 'View own ticket history', grants: { superAgent: 'EV', agent: '', franchise: '' } },
+      // Support tickets are a player ↔ Super Admin channel; staff panels no longer raise them.
+      { key: 'raiseTicket', name: 'Raise Ticket', description: 'Submit support tickets', grants: { superAgent: '', agent: '', franchise: '' } },
+      { key: 'viewTickets', name: 'View Tickets', description: 'View own ticket history', grants: { superAgent: '', agent: '', franchise: '' } },
     ],
   },
 ];

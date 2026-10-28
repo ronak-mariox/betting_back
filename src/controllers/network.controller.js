@@ -65,8 +65,8 @@ const userList = grant('userManagement', 'userList', 'V', 'You do not have permi
 // eslint-disable-next-line global-require
 const staffBetting = () => require('../services/staffBetting.service');
 
-const events = asyncHandler(async (_req, res) => {
-  res.json({ events: await staffBetting().listEvents() });
+const events = asyncHandler(async (req, res) => {
+  res.json({ events: await staffBetting().listEvents({ finished: req.query.finished === '1' }) });
 });
 
 const markets = asyncHandler(async (req, res) => {

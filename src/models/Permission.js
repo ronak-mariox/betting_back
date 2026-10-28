@@ -24,6 +24,8 @@ const permissionSchema = new Schema(
       of: String,
       default: () => new Map(),
     },
+    /** One-time default changes already applied to this role (see permission.service.js#applyDefaultUpgrades). */
+    appliedUpgrades: { type: [String], default: [] },
     updatedBy: {
       type: Schema.Types.ObjectId,
       ref: 'User',

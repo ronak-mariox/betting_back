@@ -14,16 +14,35 @@ const notify = async ({ title, body = '', category = 'general', emoji = '🔔', 
   return Notification.create({ title, body, category, emoji, recipientRole });
 };
 
-const listNotifications = async ({ recipientRole = 'super-admin', limit = DEFAULT_PAGE_LIMIT } = {}) => {
-  const filter = { recipientRole, recipient: null };
+/**
+ * Panel Profile → Preferences switches: each mutes some categories of the
+ * role's shared feed for that one account only (a switch never touched is on).
+ */
+const PANEL_PREFERENCE_CATEGORIES = {
+  notifyWallet: ['wallet'],
+  notifyBetting: ['bet', 'live', 'risk'],
+  notifySecurity: ['security'],
+};
+
+const mutedCategories = (user) => {
+  const prefs = user?.preferences;
+  const get = (key) => (prefs?.get ? prefs.get(key) : prefs?.[key]);
+  return Object.entries(PANEL_PREFERENCE_CATEGORIES)
+    .filter(([key]) => get(key) === false)
+    .flatMap(([, categories]) => categories);
+};
+
+const listNotifications = async ({ recipientRole = 'super-admin', limit = DEFAULT_PAGE_LIMIT, user = null } = {}) => {
+  const muted = mutedCategories(user);
+  const filter = { recipientRole, recipient: null, ...(muted.length ? { category: { $nin: muted } } : {}) };
   const items = await Notification.find(filter).sort({ createdAt: -1 }).limit(limit);
   const unreadCount = await Notification.countDocuments({ ...filter, unread: true });
   return { items, unreadCount };
 };
 
-const markAllRead = async ({ recipientRole = 'super-admin' } = {}) => {
+const markAllRead = async ({ recipientRole = 'super-admin', user = null } = {}) => {
   await Notification.updateMany({ recipientRole, recipient: null, unread: true }, { $set: { unread: false } });
-  return listNotifications({ recipientRole });
+  return listNotifications({ recipientRole, user });
 };
 
 const clearAll = async ({ recipientRole = 'super-admin' } = {}) => {

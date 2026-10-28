@@ -6,7 +6,9 @@ const Market = require('../models/Market');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const { money } = require('../utils/money');
+const ApiError = require('../utils/ApiError');
 const { applyScope } = require('./scope.service');
+const { inTransaction } = require('../utils/transaction');
 
 /**
  * Session and match commission, paid at the end of every match.
@@ -33,6 +35,8 @@ const LEVEL_BY_ROLE = { franchise: 'Franchise', 'super-agent': 'Super Agent', ag
 const MATCH_MARKET_TYPES = new Set(['Match Odds', 'Bookmaker', 'Tied Match', 'Winner']);
 const RATE_FIELD = { Session: 'sessionCommission', Match: 'matchCommission' };
 const SCAN_MS = 60 * 1000;
+/** Commission waits this long after a market's settlement so its ledger rows are all written. */
+const SETTLE_GRACE_MS = 2 * 60 * 1000;
 
 const kindOfMarket = (market) =>
   ['match', 'match1'].includes(market.providerType) || MATCH_MARKET_TYPES.has(market.type) ? 'Match' : 'Session';
@@ -54,7 +58,12 @@ function sharesFor(chain, field) {
     cap = rate;
     return rate;
   });
-  return chain.map((account, i) => ({ account, rate: round2(rates[i] - (rates[i + 1] ?? 0)) }));
+  return chain.map((account, i) => ({
+    account,
+    rate: round2(rates[i] - (rates[i + 1] ?? 0)),
+    received: rates[i],
+    given: rates[i + 1] ?? 0,
+  }));
 }
 
 /** The player and the staff above them, top first, stopping below super-admin. */
@@ -104,39 +113,65 @@ async function playerTotals(eventId) {
   return [...totals.values()];
 }
 
-/** Writes one share: the row (unique per match, player, account and kind), then the wallet credit. */
-async function pay({ event, player, account, kind, base, rate, when }) {
+/**
+ * Writes one share — the commission row (unique per match, player, account
+ * and kind), the wallet credit and its ledger entry — as one transaction, so
+ * a share is either fully paid or not at all (and retried on the next run).
+ */
+async function pay({ event, player, account, kind, base, rate, received, given, when }) {
   const amount = round2((base * rate) / 100);
   if (amount <= 0) return null;
-  let row;
   try {
-    row = await Commission.create({
-      entity: account._id,
-      level: LEVEL_BY_ROLE[account.role],
-      period: periodOf(when),
-      event: event._id,
-      player,
-      kind,
-      turnover: round2(base),
-      rate,
-      commission: amount,
-      status: 'Settled',
-      settledAt: when,
+    return await inTransaction(async (session) => {
+      const [row] = await Commission.create(
+        [
+          {
+            entity: account._id,
+            level: LEVEL_BY_ROLE[account.role],
+            period: periodOf(when),
+            event: event._id,
+            player,
+            kind,
+            turnover: round2(base),
+            rate,
+            receivedRate: received,
+            givenRate: given,
+            commission: amount,
+            status: 'Settled',
+            settledAt: when,
+          },
+        ],
+        { session },
+      );
+      const owner = await User.findOneAndUpdate(
+        { _id: account._id },
+        { $inc: { walletBalance: amount } },
+        { returnDocument: 'after', session },
+      );
+      const [txn] = await Transaction.create(
+        [
+          {
+            user: account._id,
+            type: 'Commission',
+            amount,
+            status: 'Completed',
+            reference: `COMM-${String(row._id).slice(-8).toUpperCase()}`,
+            kind,
+            relatedEvent: event._id,
+            counterparty: player,
+            balanceAfter: owner ? owner.walletBalance : null,
+            note: `${kind} commission — ${event.name} (${rate}% of ${money(base)}; received ${received}%, passed down ${given}%)`,
+          },
+        ],
+        { session },
+      );
+      await Commission.updateOne({ _id: row._id }, { $set: { transaction: txn._id } }, { session });
+      return row;
     });
   } catch (err) {
     if (err?.code === 11000) return null; // already paid on an earlier run
     throw err;
   }
-  await User.updateOne({ _id: account._id }, { $inc: { walletBalance: amount } });
-  await Transaction.create({
-    user: account._id,
-    type: 'Commission',
-    amount,
-    status: 'Completed',
-    reference: `COMM-${String(event._id).slice(-8).toUpperCase()}`,
-    note: `${kind} commission — ${event.name} (${rate}% of ${money(base)})`,
-  });
-  return row;
 }
 
 /**
@@ -156,15 +191,19 @@ async function settleEventCommission(eventId) {
     const bases = { Session: totals.sessionStake, Match: Math.max(0, -totals.matchNet) };
     for (const kind of ['Session', 'Match']) {
       if (bases[kind] <= 0) continue; // eslint-disable-line no-continue
-      for (const { account, rate } of sharesFor(chain, RATE_FIELD[kind])) {
+      for (const { account, rate, received, given } of sharesFor(chain, RATE_FIELD[kind])) {
         if (rate <= 0) continue; // eslint-disable-line no-continue
         // eslint-disable-next-line no-await-in-loop
-        const row = await pay({ event, player: totals.player, account, kind, base: bases[kind], rate, when });
+        const row = await pay({ event, player: totals.player, account, kind, base: bases[kind], rate, received, given, when });
         if (row) paid.push(row);
       }
     }
   }
-  await Event.updateOne({ _id: event._id }, { $set: { commissionSettledAt: when } });
+  // Commission paid and every bet settled: the match is now fully Settled.
+  await Event.updateOne(
+    { _id: event._id },
+    { $set: { commissionSettledAt: when, ...(event.status === 'Completed' ? { status: 'Settled' } : {}) } },
+  );
   if (paid.length) {
     console.log(`Commission paid for ${event.name}: ${paid.length} shares`); // eslint-disable-line no-console
   }
@@ -173,10 +212,16 @@ async function settleEventCommission(eventId) {
 
 /** Finished matches whose bets are all settled and whose commission hasn't been paid yet. */
 async function settleFinishedMatches() {
+  // A settlement interrupted part-way would otherwise hold its match's commission forever.
+  // eslint-disable-next-line global-require
+  await require('./playerBet.service').finishInterruptedSettlements();
   const events = await Event.find({ status: { $in: ['Completed', 'Settled'] }, commissionSettledAt: null }).select('_id').lean();
   for (const { _id } of events) {
     // eslint-disable-next-line no-await-in-loop
     if (await Bet.exists({ event: _id, status: 'Pending' })) continue; // eslint-disable-line no-continue
+    // A market settled moments ago may still be writing its ledger rows, which match commission reads.
+    // eslint-disable-next-line no-await-in-loop
+    if (await Market.exists({ event: _id, settledAt: { $gte: new Date(Date.now() - SETTLE_GRACE_MS) } })) continue; // eslint-disable-line no-continue
     try {
       // eslint-disable-next-line no-await-in-loop
       await settleEventCommission(_id);
@@ -201,8 +246,9 @@ function startScheduler() {
   setInterval(tick, SCAN_MS);
 }
 
-const listCommission = async ({ level, status, kind, scope = null }) => {
+const listCommission = async ({ level, status, kind, event, scope = null }) => {
   const filter = applyScope({}, scope, 'entity');
+  if (event) filter.event = event;
   if (level) filter.level = level;
   if (status) filter.status = status;
   if (kind) filter.kind = kind;
@@ -268,7 +314,101 @@ async function playerStatement(player, { limit = 30 } = {}) {
   });
 }
 
+/**
+ * The full settlement of one match, for the Complete Match view: each
+ * market's result, each player's session stake and session / match result,
+ * and every commission share along the chain (rate received, passed down
+ * and kept). Staff only see players and shares inside their own network.
+ */
+async function eventSettlement(eventId, scope = null) {
+  const event = await Event.findById(eventId).select('name status startTime commissionSettledAt provider').lean();
+  if (!event) throw ApiError.notFound('Match not found');
+  const inScope = (id) => !scope || scope.some((s) => String(s) === String(id));
+
+  const [markets, allBets, allCommissions] = await Promise.all([
+    Market.find({ event: event._id }).select('name type providerType status winner settledAt bets stake').sort({ createdAt: 1 }).lean(),
+    Bet.find({ event: event._id }).select('user market status amount stake payout').lean(),
+    Commission.find({ event: event._id })
+      .populate('entity', 'name username role')
+      .populate('transaction', 'reference balanceAfter')
+      .select('entity player kind level turnover rate receivedRate givenRate commission settledAt transaction')
+      .lean(),
+  ]);
+  const bets = allBets.filter((bet) => inScope(bet.user));
+  const commissions = allCommissions.filter((row) => row.entity && inScope(row.entity._id));
+  const kindById = new Map(markets.map((m) => [String(m._id), kindOfMarket(m)]));
+  const nets = await Transaction.aggregate([
+    { $match: { relatedBet: { $in: bets.map((b) => b._id) }, type: { $in: ['Bet Win', 'Bet Loss'] } } },
+    { $group: { _id: '$relatedBet', net: { $sum: '$amount' } } },
+  ]);
+  const netByBet = new Map(nets.map((row) => [String(row._id), row.net]));
+
+  const playerIds = [...new Set(bets.map((b) => String(b.user)))];
+  const people = await User.find({ _id: { $in: playerIds } }).select('name username parent').lean();
+  const players = playerIds.map((id) => {
+    const person = people.find((p) => String(p._id) === id);
+    const line = { sessionStake: 0, sessionResult: 0, matchResult: 0, openBets: 0 };
+    for (const bet of bets) {
+      if (String(bet.user) !== id) continue; // eslint-disable-line no-continue
+      if (bet.status === 'Pending') line.openBets += 1;
+      const net = netByBet.get(String(bet._id)) || 0;
+      if (kindById.get(String(bet.market)) === 'Match') line.matchResult += net;
+      else {
+        line.sessionResult += net;
+        if (bet.status !== 'Void') line.sessionStake += Number(bet.stake ?? bet.amount) || 0;
+      }
+    }
+    const shares = commissions
+      .filter((row) => String(row.player) === id)
+      .map((row) => ({
+        kind: row.kind,
+        level: row.level,
+        account: { _id: row.entity._id, name: row.entity.name, username: row.entity.username, role: row.entity.role },
+        base: row.turnover,
+        receivedRate: row.receivedRate,
+        givenRate: row.givenRate,
+        rate: row.rate,
+        commission: row.commission,
+        reference: row.transaction?.reference || '',
+        settledAt: row.settledAt,
+      }));
+    return {
+      player: { _id: id, name: person?.name || '', username: person?.username || '' },
+      ...Object.fromEntries(Object.entries(line).map(([key, value]) => [key, key === 'openBets' ? value : round2(value)])),
+      shares,
+    };
+  });
+
+  const totalOf = (kind) => round2(commissions.filter((row) => row.kind === kind).reduce((sum, row) => sum + row.commission, 0));
+  const byLevel = {};
+  for (const row of commissions) byLevel[row.level] = round2((byLevel[row.level] || 0) + row.commission);
+  return {
+    event: { ...event, commissionPaid: Boolean(event.commissionSettledAt) },
+    markets: markets.map((m) => ({
+      _id: m._id,
+      name: m.name,
+      type: m.type,
+      kind: kindOfMarket(m),
+      result: m.winner || '',
+      settledAt: m.settledAt,
+      bets: m.bets || 0,
+      settlement: m.winner === 'Void' ? 'Voided' : m.winner ? 'Settled' : m.bets ? 'Awaiting result' : 'No bets',
+    })),
+    players,
+    totals: {
+      players: players.length,
+      sessionStake: round2(players.reduce((sum, p) => sum + p.sessionStake, 0)),
+      sessionResult: round2(players.reduce((sum, p) => sum + p.sessionResult, 0)),
+      matchResult: round2(players.reduce((sum, p) => sum + p.matchResult, 0)),
+      sessionCommission: totalOf('Session'),
+      matchCommission: totalOf('Match'),
+      byLevel,
+    },
+  };
+}
+
 module.exports = {
+  eventSettlement,
   listCommission,
   settleEventCommission,
   settleFinishedMatches,

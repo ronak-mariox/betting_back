@@ -22,4 +22,9 @@ const list = asyncHandler(async (req, res) => {
   res.json({ items });
 });
 
-module.exports = { list };
+/** Complete Match → settlement breakdown (scoped like the list). */
+const eventSettlement = asyncHandler(async (req, res) => {
+  res.json(await commissionService.eventSettlement(req.params.id, await commissionScope(req.user)));
+});
+
+module.exports = { list, eventSettlement };
