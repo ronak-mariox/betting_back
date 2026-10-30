@@ -7,6 +7,11 @@ const { notFound, errorHandler } = require('./middleware/errorHandler');
 
 const app = express();
 
+// Public liveness check for uptime pings (see keepAlive.js); registered before every other middleware.
+app.get('/health', (_req, res) => {
+  res.status(200).json({ status: 'ok', time: Date.now() });
+});
+
 app.use(helmet());
 app.use(
   cors({

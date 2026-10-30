@@ -8,6 +8,7 @@ const { startSettingsCache } = require('./src/services/settings.service');
 const { startScheduler: startRiskScans } = require('./src/services/riskDetection.service');
 const { start: startDiamondFeed } = require('./src/services/diamondSync.service');
 const { startScheduler: startCommission } = require('./src/services/commission.service');
+const { startKeepAlive } = require('./src/keepAlive');
 
 async function start() {
   await connectDb();
@@ -28,6 +29,8 @@ async function start() {
   realtime.init(server);
   server.listen(env.port, () => {
     console.log(`Auth/authorization API listening on port ${env.port}`); // eslint-disable-line no-console
+    // Render free tier: ping our own /health every 10 minutes so the service never sleeps.
+    startKeepAlive();
   });
 }
 

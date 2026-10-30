@@ -48,19 +48,24 @@ const recentCalls = [];
  */
 
 const SPORT = 'Cricket';
-/** A fixture missing from this many list syncs in a row is treated as finished. */
-const MISSES_TO_FINISH = 3;
+/** A fixture missing from the list for about this long (in a row) is treated as finished. */
+const MISSING_TO_FINISH_MS = 90 * 1000;
+const MISSES_TO_FINISH = Math.max(3, Math.ceil(MISSING_TO_FINISH_MS / env.diamond.matchListMs));
 /** A not-yet-live fixture missing this long after its start time is treated as over. */
 const MISSING_GRACE_MS = 12 * 60 * 60 * 1000;
 
 const missCount = new Map();
 const lastOddsAt = new Map();
+/** Matches whose ball is in play right now (Diamond marks sections "Ball Running" while it is). */
+const ballRunning = new Set();
 /**
  * Diamond answers 400 "something went wrong" for a match it no longer serves
  * (finished, or replaced by a new id). Such a match is retried after this
  * pause instead of every second, until the match list retires it.
  */
 const ODDS_FAILURE_BACKOFF_MS = 30 * 1000;
+/** How often due matches are looked for; each match keeps its own live / upcoming interval. */
+const ODDS_TICK_MS = 200;
 
 // ------------------------------------------------------------------ parsing
 
@@ -192,7 +197,14 @@ function mapMarkets(raw) {
     } else if (m.gtype === 'match' || m.gtype === 'match1' || m.gtype === 'cricketcasino') {
       const runners = sections.map((section) => {
         const price = round2(toDecimal(m.gtype, backPrice(section)));
-        return { name: section.nat, price, active: sectionOpen(section) && price >= 1.01, externalId: String(section.sid) };
+        const lay = m.gtype === 'cricketcasino' ? 0 : round2(toDecimal(m.gtype, level(section, 'lay1').odds));
+        return {
+          name: section.nat,
+          price,
+          lay: lay >= 1.01 ? lay : null,
+          active: sectionOpen(section) && price >= 1.01,
+          externalId: String(section.sid),
+        };
       });
       if (runners.length < 2) continue; // eslint-disable-line no-continue
       const name =
@@ -278,13 +290,18 @@ async function syncMatchList() {
     const existing = await Event.findOne({ provider: 'diamond', externalId });
     if (existing && ['Completed', 'Settled'].includes(existing.status)) continue;
 
-    const wanted = existing?.adminSuspended ? 'Suspended' : m.iplay ? 'Live' : 'Upcoming';
+    // Diamond clears `iplay` during breaks (e.g. overnight in a Test), so a
+    // match that has started and is still listed counts as live. An
+    // unreadable `stime` parses to "now", which is not before `started`.
+    const startTime = parseStartTime(m.stime);
+    const inProgress = m.iplay || startTime.getTime() < started;
+    const wanted = existing?.adminSuspended ? 'Suspended' : inProgress ? 'Live' : 'Upcoming';
     const fields = {
       sport: SPORT,
       league: m.cname || '',
       name: String(m.ename || '').replace(/\s+/g, ' ').trim(),
       emoji: '🏏',
-      startTime: parseStartTime(m.stime),
+      startTime,
       status: wanted,
       hasStream: Boolean(m.tv),
       syncedAt: new Date(),
@@ -337,8 +354,25 @@ async function syncMatchList() {
 
 // ---------------------------------------------------------------------- odds
 
+/** Records whether a ball is in play and tells the apps when that changes. */
+function setBallRunning(eventId, running) {
+  const id = String(eventId);
+  if (ballRunning.has(id) === running) return;
+  if (running) ballRunning.add(id);
+  else ballRunning.delete(id);
+  realtime.emitBall(id, running);
+}
+
+const isBallRunning = (eventId) => ballRunning.has(String(eventId));
+
 async function syncEventOdds(event) {
-  const mapped = mapMarkets(await diamond.matchMarkets(event.externalId));
+  const raw = await diamond.matchMarkets(event.externalId);
+  const mapped = mapMarkets(raw);
+  setBallRunning(
+    event._id,
+    event.status === 'Live' &&
+      raw.some((m) => /ball running/i.test(m.status || '') || (m.section || []).some((s) => /ball running/i.test(s.gstatus || ''))),
+  );
   const now = new Date();
   const seen = new Set();
   const eventOpen = event.status === 'Live' || event.status === 'Upcoming';
@@ -347,6 +381,7 @@ async function syncEventOdds(event) {
     (await Market.find({ event: event._id, externalId: { $ne: null } })).map((doc) => [doc.externalId, doc]),
   );
   const changed = []; // pushed to clients as { _id, name, type, status, maxBet, runners }
+  const updates = []; // written in one round trip, so a busy match isn't held up by a write per market
   let listChanged = false; // a market opened, closed or appeared: clients refetch the list
 
   for (const m of mapped) {
@@ -363,6 +398,7 @@ async function syncEventOdds(event) {
         externalId: r.externalId,
         line: r.line ?? null,
         rate: r.rate ?? null,
+        lay: r.lay ?? null,
       };
     });
     const status = m.open && eventOpen && !existing?.adminSuspended ? 'Active' : 'Suspended';
@@ -386,7 +422,7 @@ async function syncEventOdds(event) {
       if (status === 'Active') listChanged = true;
       continue; // eslint-disable-line no-continue
     }
-    const priceKey = (rs) => rs.map((r) => `${r.name}|${r.odds}|${r.line ?? ''}|${r.rate ?? ''}|${r.active !== false}`).join(';');
+    const priceKey = (rs) => rs.map((r) => `${r.name}|${r.odds}|${r.lay ?? ''}|${r.line ?? ''}|${r.rate ?? ''}|${r.active !== false}`).join(';');
     const differs =
       existing.status !== status ||
       existing.name !== fields.name ||
@@ -400,8 +436,7 @@ async function syncEventOdds(event) {
     // Session / fancy lines flip suspended every ball: the odds push carries that; only the
     // headline markets opening or closing makes clients refetch the match list.
     if (existing.status !== status && existing.betStyle !== 'session' && fields.type !== 'Fancy') listChanged = true;
-    // eslint-disable-next-line no-await-in-loop
-    await Market.updateOne({ _id: existing._id }, { $set: fields });
+    updates.push({ updateOne: { filter: { _id: existing._id }, update: { $set: fields } } });
     changed.push({
       _id: String(existing._id),
       name: fields.name,
@@ -411,12 +446,14 @@ async function syncEventOdds(event) {
       remark: fields.remark,
       status,
       maxBet: fields.maxBet ?? existing.maxBet,
-      runners: runners.map(({ name, odds, active, line, rate }) => ({ name, odds, active, line, rate })),
+      runners: runners.map(({ name, odds, active, line, rate, lay }) => ({ name, odds, active, line, rate, ...(lay ? { lay } : {}) })),
     });
   }
 
-  // Unchanged prices are still fresh prices: one write keeps every market's oddsAt current.
-  await Market.updateMany({ event: event._id, externalId: { $in: [...seen] } }, { $set: { oddsAt: now } });
+  // Unchanged prices are still fresh prices: the same write keeps every market's oddsAt current.
+  updates.push({ updateMany: { filter: { event: event._id, externalId: { $in: [...seen] } }, update: { $set: { oddsAt: now } } } });
+  await Market.bulkWrite(updates, { ordered: false });
+  realtime.emitOdds(event._id, changed);
 
   // Markets the feed no longer offers are closed for betting (never deleted: bets may sit on them).
   const closed = await Market.updateMany(
@@ -425,26 +462,33 @@ async function syncEventOdds(event) {
   );
   if (closed.modifiedCount) listChanged = true;
 
-  realtime.emitOdds(event._id, changed);
   if (listChanged) realtime.emitMatchesChanged();
-  lastOddsAt.set(String(event._id), Date.now());
   return mapped.length;
 }
 
-/** Live matches every few seconds, upcoming ones about once a minute. */
+/**
+ * Live matches every half second, upcoming ones every few seconds. Each match runs
+ * on its own: a slow answer for one match never delays the others, and a
+ * match is not asked again while its previous request is still out.
+ */
+const oddsInFlight = new Set();
 async function syncDueOdds() {
   const events = await Event.find({ provider: 'diamond', status: { $in: ['Live', 'Upcoming', 'Suspended'] }, feedMissingSince: null });
   const now = Date.now();
-  await Promise.all(
-    events
-      .filter((e) => now - (lastOddsAt.get(String(e._id)) || 0) >= (e.status === 'Live' ? env.diamond.liveOddsMs : env.diamond.upcomingOddsMs))
-      .map((e) =>
-        syncEventOdds(e).catch((err) => {
-          lastOddsAt.set(String(e._id), Date.now() + ODDS_FAILURE_BACKOFF_MS);
-          logFailure('odds', err.message);
-        }),
-      ),
-  );
+  for (const e of events) {
+    const id = String(e._id);
+    const interval = e.status === 'Live' ? env.diamond.liveOddsMs : env.diamond.upcomingOddsMs;
+    if (oddsInFlight.has(id) || now - (lastOddsAt.get(id) || 0) < interval) continue; // eslint-disable-line no-continue
+    oddsInFlight.add(id);
+    lastOddsAt.set(id, now);
+    syncEventOdds(e)
+      .catch((err) => {
+        lastOddsAt.set(id, Date.now() + ODDS_FAILURE_BACKOFF_MS);
+        setBallRunning(id, false); // no fresh answer: don't leave the ball showing
+        logFailure('odds', err.message);
+      })
+      .finally(() => oddsInFlight.delete(id));
+  }
 }
 
 // ------------------------------------------------------------------- results
@@ -532,7 +576,52 @@ async function settleFromResult(event, market) {
   return 'unmatched'; // left for the admin to settle by hand; lastResult shows what came back
 }
 
+/**
+ * Diamond's result endpoint can't be relied on. A market with open bets that
+ * the feed stopped offering this long ago (or whose match has finished) is
+ * flagged to the admin, once per market, to be settled by hand from Markets.
+ */
+const RESULT_WAIT_MS = 10 * 60 * 1000;
+
+async function alertResultsNeeded() {
+  if (feedDown) return 0; // every market looks dropped while the feed is unreachable
+  const cutoff = new Date(Date.now() - RESULT_WAIT_MS);
+  const candidates = await Market.find({
+    externalId: { $ne: null },
+    winner: { $in: ['', null] },
+    resultAlertAt: null,
+    oddsAt: { $lt: cutoff },
+  })
+    .select('_id event name')
+    .lean();
+  if (!candidates.length) return 0;
+  const withBets = new Set((await Bet.distinct('market', { market: { $in: candidates.map((m) => m._id) }, status: 'Pending' })).map(String));
+  const due = candidates.filter((m) => withBets.has(String(m._id)));
+  if (!due.length) return 0;
+  // A match pulled from the feed before it started is only held, not over.
+  const events = await Event.find({ _id: { $in: due.map((m) => m.event) }, provider: 'diamond', feedMissingSince: null }).select('name').lean();
+
+  let alerted = 0;
+  for (const event of events) {
+    const markets = due.filter((m) => String(m.event) === String(event._id));
+    const names = markets.map((m) => m.name);
+    const shown = names.length > 5 ? `${names.slice(0, 5).join(', ')} and ${names.length - 5} more` : names.join(', ');
+    // eslint-disable-next-line no-await-in-loop
+    await notificationService.notify({
+      title: `Result needed: ${event.name}`,
+      body: `${markets.length === 1 ? '1 market has' : `${markets.length} markets have`} open bets but no result from Diamond: ${shown}. Settle ${markets.length === 1 ? 'it' : 'them'} from Markets.`,
+      category: 'bet',
+      emoji: '🏁',
+    });
+    // eslint-disable-next-line no-await-in-loop
+    await Market.updateMany({ _id: { $in: markets.map((m) => m._id) } }, { $set: { resultAlertAt: new Date() } });
+    alerted += markets.length;
+  }
+  return alerted;
+}
+
 async function syncResults() {
+  await alertResultsNeeded().catch((err) => logFailure('result alert', err.message));
   const openMarkets = await Market.find({ externalId: { $ne: null }, winner: { $in: ['', null] } }).select('_id event').lean();
   if (!openMarkets.length) return;
   const withBets = new Set((await Bet.distinct('market', { market: { $in: openMarkets.map((m) => m._id) }, status: 'Pending' })).map(String));
@@ -577,7 +666,7 @@ function every(ms, task, label) {
 function start() {
   if (!diamond.isConfigured() || timers.length) return false;
   every(env.diamond.matchListMs, syncMatchList, 'match list');
-  every(Math.min(env.diamond.liveOddsMs, env.diamond.upcomingOddsMs), syncDueOdds, 'odds');
+  every(ODDS_TICK_MS, syncDueOdds, 'odds');
   every(env.diamond.resultsMs, syncResults, 'results');
   every(5000, watchFreshness, 'freshness');
   every(10 * 60 * 1000, pruneFinished, 'cleanup');
@@ -688,9 +777,11 @@ module.exports = {
   syncEventOdds,
   syncDueOdds,
   syncResults,
+  alertResultsNeeded,
   mapMarkets,
   parseStartTime,
   readResult,
   mediaFor,
+  isBallRunning,
   isRealFixture,
 };

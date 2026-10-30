@@ -73,6 +73,10 @@ All routes are mounted under `/api`. Authenticated routes take
 `GET /health` (public) returns `{ status, dbMs, cpu, uptimeSeconds, liveMatches }`
 — the panels' topbar and status bar poll it.
 
+Outside `/api`, a bare `GET /health` answers `{ status: 'ok', time }`. On Render
+(where `RENDER_EXTERNAL_URL` is set) the server pings it every 10 minutes
+(`src/keepAlive.js`) so the free-tier instance never goes to sleep.
+
 ### Player — `/api/player` (players, from the app)
 
 Bets are exchange style: the stake is **held**, not debited, until the market
@@ -371,13 +375,15 @@ requests, high-risk flags, and new support tickets.
 
 ## Live updates (Socket.IO)
 
-The Diamond feed is REST-only, so the backend polls it (live matches every
-second, `DIAMOND_LIVE_ODDS_MS`) and pushes what changed over Socket.IO on the
+The Diamond feed is REST-only, so the backend polls it (each live match every
+half second, `DIAMOND_LIVE_ODDS_MS`; upcoming ones and the match list every 5 s,
+`DIAMOND_UPCOMING_ODDS_MS` / `DIAMOND_MATCH_LIST_MS`) and pushes what changed over Socket.IO on the
 same port as the API. Connect with `io(<server>, { auth: { token: <access token> } })`.
 
 | Event | Sent to | Payload / meaning |
 | --- | --- | --- |
 | `odds` | every client | `{ eventId, markets: [{ _id, name, type, status, maxBet, runners }] }` — only markets whose prices or status changed |
+| `ball` | every client | `{ eventId, running }` — a ball is being bowled (`running: true`) or the delivery is done |
 | `matches:changed` | every client | a match went live / finished or a market opened / closed — refetch `GET /player/matches` |
 | `player:changed` | that player's devices | their wallet or bets changed — refetch them |
 | `admin:changed` | panel (non-player) users | `{ kind: 'bets' \| 'ledger' \| 'wallet' }` — refresh open pages |

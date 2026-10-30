@@ -36,6 +36,8 @@ function runnersFor(market, event) {
       active: r.active !== false,
       // Session sides: the run line and its rate (100 = even money).
       ...(r.line != null ? { line: r.line, rate: r.rate } : {}),
+      // Match Odds / Bookmaker: the khai (lay) price beside the lagai one.
+      ...(r.lay ? { lay: r.lay } : {}),
     }));
   }
   const { home, away } = sides(event.name);
@@ -136,6 +138,9 @@ const toMatch = (event, markets) => {
     // Feed matches: embeddable live score card and (when the provider has one) video.
     // eslint-disable-next-line global-require
     ...require('./diamondSync.service').mediaFor(event),
+    // A ball is in play right now (later changes arrive as `ball` pushes).
+    // eslint-disable-next-line global-require
+    ballRunning: require('./diamondSync.service').isBallRunning(event._id),
     // The provider may start publishing a score mid-match: the app keeps asking for one.
     hasScoreFeed: event.provider === 'diamond',
   };

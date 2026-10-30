@@ -105,8 +105,11 @@ const PROFILE_FIELDS = ['name', 'email', 'phone', 'city', 'state', 'dob'];
 const STAFF_FIELDS = ['businessName', 'bettingLimit', 'maxExposure', 'shareHolding'];
 /** Staff terms only the Commission Settings grant may set. */
 const GRANTED_FIELDS = ['shareHolding'];
-/** Betting / exposure limits are risk controls: only the Super Admin sets them. */
-const ADMIN_ONLY_FIELDS = ['bettingLimit', 'maxExposure'];
+/**
+ * Betting / exposure limits are risk controls, and a company share makes the
+ * account a partner: only the Super Admin sets them.
+ */
+const ADMIN_ONLY_FIELDS = ['bettingLimit', 'maxExposure', 'shareHolding'];
 /**
  * Session / match commission an account receives (see commission.service.js).
  * Its direct upline sets them for players and staff alike, never above the
