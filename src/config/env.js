@@ -38,9 +38,9 @@ const env = {
     /** Embeddable players, `gmid` appended. */
     streamUrl: process.env.DIAMOND_STREAM_URL || 'https://live.cricketid.xyz/directStream?gmid=',
     scoreUrl: process.env.DIAMOND_SCORE_URL || 'https://score.akamaized.uk/diamond-live-score?gmid=',
-    matchListMs: Number(process.env.DIAMOND_MATCH_LIST_MS) || 30000,
-    liveOddsMs: Number(process.env.DIAMOND_LIVE_ODDS_MS) || 1000,
-    upcomingOddsMs: Number(process.env.DIAMOND_UPCOMING_ODDS_MS) || 60000,
+    matchListMs: Number(process.env.DIAMOND_MATCH_LIST_MS) || 5000,
+    liveOddsMs: Number(process.env.DIAMOND_LIVE_ODDS_MS) || 500,
+    upcomingOddsMs: Number(process.env.DIAMOND_UPCOMING_ODDS_MS) || 5000,
     resultsMs: Number(process.env.DIAMOND_RESULTS_MS) || 120000,
   },
   passwordReset: {

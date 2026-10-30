@@ -89,7 +89,17 @@ router.patch(
     body('state').optional({ checkFalsy: true }).trim().isLength({ max: 60 }),
     body('dob').optional({ checkFalsy: true }).isISO8601().withMessage('dob must be an ISO date (YYYY-MM-DD)'),
     body('preferences').optional().isObject(),
-    body('preferences.*').optional().isBoolean(),
+    // Switches are true / false; Language and Theme are the two named choices.
+    body('preferences.*')
+      .optional()
+      .custom((value, { path }) =>
+        path === 'preferences.language'
+          ? ['en', 'hi'].includes(value)
+          : path === 'preferences.theme'
+            ? ['dark', 'light'].includes(value)
+            : typeof value === 'boolean',
+      )
+      .withMessage('Invalid preference value'),
     body('avatar')
       .optional({ checkFalsy: true })
       .isString()
@@ -143,6 +153,14 @@ router.post(
 );
 
 router.get('/sessions', authenticate, authController.listSessions);
+/** Signs out every other device of the caller's own account; `refreshToken` identifies the one to keep. */
+router.post(
+  '/sessions/revoke-others',
+  authenticate,
+  [body('refreshToken').isString().isLength({ min: 10 })],
+  validate,
+  authController.revokeOtherSessions,
+);
 router.delete(
   '/sessions/:id',
   authenticate,

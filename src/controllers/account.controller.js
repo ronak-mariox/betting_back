@@ -111,16 +111,22 @@ const update = asyncHandler(async (req, res) => {
     permissionService.hasPermission(req.user.role, 'accountSettings', 'manageSubAgents', 'X'),
     permissionService.hasPermission(req.user.role, 'accountSettings', 'commissionSettings', 'X'),
   ]);
+  const before = Object.fromEntries(accountService.COMMISSION_FIELDS.map((field) => [field, account[field]]));
   const updated = await accountService.updateManagedAccount(req.user, account, req.body, {
     canEditPlayers,
     canManageStaff,
     canSetCommission,
   });
+  // Commission-rate changes keep their before / after values in the audit history.
+  const rateChanges = accountService.COMMISSION_FIELDS.filter((field) => Number(before[field] || 0) !== Number(updated[field] || 0));
   await auditService.record({
     actor: req.user,
-    action: 'account_updated',
+    action: rateChanges.length ? 'commission_rate_changed' : 'account_updated',
     target: updated,
     req,
+    ...(rateChanges.length
+      ? { metadata: Object.fromEntries(rateChanges.map((field) => [field, { from: before[field] || 0, to: updated[field] || 0 }])) }
+      : {}),
   });
 
   res.json({ account: updated });

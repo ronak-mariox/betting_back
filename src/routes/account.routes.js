@@ -6,9 +6,10 @@ const validate = require('../middleware/validate');
 const { authenticate, authorize, requireOwnSubtree } = require('../middleware/auth');
 const { grant } = require('../services/scope.service');
 
+const staffOnly = authorize('super-admin', 'franchise', 'super-agent', 'agent');
 /** Listing / opening accounts: staff only, and only with "User List" (view). */
 const userList = [
-  authorize('super-admin', 'franchise', 'super-agent', 'agent'),
+  staffOnly,
   grant('userManagement', 'userList', 'V', 'You do not have permission to view users'),
 ];
 const { ROLE_ORDER } = require('../constants/roles');
@@ -57,9 +58,13 @@ router.post(
     body('email').optional({ checkFalsy: true }).isEmail().withMessage('Enter a valid email address'),
     phoneRule(),
     body('dob').optional({ checkFalsy: true }).isISO8601(),
+    body('city').optional().isString().trim().isLength({ max: 60 }),
+    body('state').optional().isString().trim().isLength({ max: 60 }),
+    body('status').optional().isIn(['active', 'suspended']),
     ...STAFF_FIELD_RULES,
   ],
   validate,
+  staffOnly,
   accountController.create,
 );
 
@@ -78,6 +83,7 @@ router.patch(
     ...STAFF_FIELD_RULES,
   ],
   validate,
+  staffOnly,
   requireOwnSubtree('id'),
   accountController.update,
 );
@@ -86,6 +92,7 @@ router.patch(
   '/:id/status',
   [param('id').isMongoId(), body('status').isIn(['active', 'suspended'])],
   validate,
+  staffOnly,
   requireOwnSubtree('id'),
   accountController.updateStatus,
 );

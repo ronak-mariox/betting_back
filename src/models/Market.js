@@ -37,6 +37,8 @@ const marketSchema = new Schema(
            */
           line: { type: Number, default: null },
           rate: { type: Number, default: null },
+          /** Match Odds / Bookmaker: the provider's lay ("khai") price, decimal. Shown only — bets are back ("lagai"). */
+          lay: { type: Number, default: null },
         },
       ],
       default: [],
@@ -72,6 +74,8 @@ const marketSchema = new Schema(
     /** Last raw answer from Diamond's result endpoint, for the admin to see. */
     lastResult: { type: String, default: '' },
     lastResultAt: { type: Date, default: null },
+    /** When the admin was told this market needs its result entered by hand. */
+    resultAlertAt: { type: Date, default: null },
     /** Cached rollups from this market's bets. */
     bets: { type: Number, default: 0 },
     stake: { type: Number, default: 0 },

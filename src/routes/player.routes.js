@@ -9,6 +9,8 @@ const router = Router();
 router.use(authenticate, authorize('player'));
 
 router.get('/wallet', playerController.wallet);
+/** Where to pay a deposit: the QR / UPI the Super Admin set in Settings → Payment Details. */
+router.get('/deposit-details', playerController.depositDetails);
 router.post(
   '/wallet/requests',
   [

@@ -106,6 +106,11 @@ const STAFF_FIELDS = ['businessName', 'bettingLimit', 'maxExposure', 'shareHoldi
 /** Staff terms only the Commission Settings grant may set. */
 const GRANTED_FIELDS = ['shareHolding'];
 /**
+ * Betting / exposure limits are risk controls, and a company share makes the
+ * account a partner: only the Super Admin sets them.
+ */
+const ADMIN_ONLY_FIELDS = ['bettingLimit', 'maxExposure', 'shareHolding'];
+/**
  * Session / match commission an account receives (see commission.service.js).
  * Its direct upline sets them for players and staff alike, never above the
  * upline's own rate.
@@ -142,6 +147,27 @@ function assertCommissionWithin(parent, changes) {
   }
 }
 
+/**
+ * Lowering an account's rate below what it already passes down would make
+ * its downline's rates invalid (and silently take its own share to 0%), so
+ * the downline has to be lowered first.
+ */
+async function assertNotBelowChildren(account, changes) {
+  for (const field of COMMISSION_FIELDS) {
+    if (changes[field] === undefined) continue; // eslint-disable-line no-continue
+    // eslint-disable-next-line no-await-in-loop
+    const child = await User.findOne({ parent: account._id, [field]: { $gt: changes[field] } })
+      .select(`username ${field}`)
+      .sort({ [field]: -1 })
+      .lean();
+    if (child) {
+      throw ApiError.badRequest(
+        `${COMMISSION_LABEL[field]} commission ${changes[field]}% nahi ho sakta — neeche ${child.username} ko ${child[field]}% diya hua hai. Pehle unka rate kam karo.`,
+      );
+    }
+  }
+}
+
 /** Player-only shareable code, e.g. "RAHUL2318" — derived from the username. */
 async function generateReferralCode(username) {
   const base = username.replace(/[^a-z0-9]/gi, '').slice(0, 8).toUpperCase() || 'PLAYER';
@@ -171,14 +197,14 @@ async function pickAvailableAgent() {
 
 /**
  * Self-registration from the bettingApp SignUpScreen: username + password
- * (+ optional referral code). Every new player is placed under an agent:
+ * (+ optional referral code). Where the new player lands:
  *   - an active agent's referral code puts the player under that agent;
  *   - a player's referral code records the referrer and puts the new player
  *     under the referrer's agent (if that agent is active);
  *   - an active partner's code links the player to that partner (for its
  *     volume and revenue share) and places them like no code would;
- *   - otherwise (no code, unknown code, inactive agent) the player goes to a
- *     random active agent. Unassigned only when no active agent exists.
+ *   - otherwise (no code, unknown code, inactive agent) the player is left
+ *     unassigned — under the Company, managed by the Super Admin.
  */
 async function registerPlayer({ username, password, referralCode }) {
   const normalizedUsername = username.trim().toLowerCase();
@@ -207,7 +233,7 @@ async function registerPlayer({ username, password, referralCode }) {
       }
     }
   }
-  if (!parent) parent = await pickAvailableAgent();
+  // No (usable) code: the player joins under the Company — only the Super Admin manages them.
 
   const passwordHash = await hashPassword(password);
   const ownReferralCode = await generateReferralCode(normalizedUsername);
@@ -241,8 +267,9 @@ async function ensureAgentReferralCodes() {
  * actor; hierarchy + role rules are enforced before anything is written.
  */
 async function createManagedAccount(creator, payload, { canSetCommission = true } = {}) {
-  const { role, username, password, parentId, ...profile } = payload;
+  const { role, username, password, parentId, status, ...profile } = payload;
   if (!canSetCommission) for (const field of GRANTED_FIELDS) delete profile[field];
+  if (creator.role !== 'super-admin') for (const field of ADMIN_ONLY_FIELDS) delete profile[field];
 
   if (!ROLE_ORDER.includes(role)) throw ApiError.badRequest('Unknown role');
   assertCanCreateRole(creator.role, role);
@@ -263,6 +290,8 @@ async function createManagedAccount(creator, payload, { canSetCommission = true 
     parent: parent ? parent._id : null,
     createdBy: creator._id,
     ...pickProfile(profile, role),
+    // The create form's Active / Inactive choice; an inactive account can't sign in until activated.
+    ...(status === 'suspended' ? { status: 'suspended' } : {}),
   };
 
   // Players share codes with friends; agents share them to bring players onto their panel.
@@ -306,9 +335,11 @@ async function updateManagedAccount(actor, account, payload, { canEditPlayers, c
   if (account.role !== 'player' && !isAdmin && !canSetCommission) {
     for (const field of GRANTED_FIELDS) delete changes[field];
   }
+  if (!isAdmin) for (const field of ADMIN_ONLY_FIELDS) delete changes[field];
   if (COMMISSION_FIELDS.some((field) => changes[field] !== undefined)) {
     const parent = account.parent ? await User.findById(account.parent).select('role username matchCommission sessionCommission') : null;
     assertCommissionWithin(parent, changes);
+    await assertNotBelowChildren(account, changes);
   }
   Object.assign(account, changes);
   await account.save();

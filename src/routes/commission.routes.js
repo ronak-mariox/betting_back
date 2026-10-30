@@ -1,5 +1,5 @@
 const { Router } = require('express');
-const { query } = require('express-validator');
+const { param, query } = require('express-validator');
 const commissionController = require('../controllers/commission.controller');
 const validate = require('../middleware/validate');
 const { authenticate, authorize } = require('../middleware/auth');
@@ -14,9 +14,13 @@ router.get(
     query('level').optional().isIn(COMMISSION_LEVELS),
     query('status').optional().isIn(COMMISSION_STATUSES),
     query('kind').optional().isIn(COMMISSION_KINDS),
+    query('event').optional().isMongoId(),
   ],
   validate,
   commissionController.list,
 );
+
+/** One match's full settlement: results, each player's P/L and every commission share. */
+router.get('/events/:id/settlement', [param('id').isMongoId()], validate, commissionController.eventSettlement);
 
 module.exports = router;

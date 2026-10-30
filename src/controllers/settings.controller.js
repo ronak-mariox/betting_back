@@ -1,3 +1,4 @@
+const auditService = require('../services/audit.service');
 const asyncHandler = require('../utils/asyncHandler');
 const settingsService = require('../services/settings.service');
 const mailService = require('../services/mail.service');
@@ -61,4 +62,15 @@ const testSms = asyncHandler(async (req, res) => {
   res.json({ message: `Test SMS sent to ${req.body.to}` });
 });
 
-module.exports = { get, updateSection, addApiKey, updateApiKey, deleteApiKey, testEmail, testSms };
+const updatePaymentDetails = asyncHandler(async (req, res) => {
+  const paymentDetails = await settingsService.updatePaymentDetails(req.body);
+  await auditService.record({
+    actor: req.user,
+    action: 'payment_details_updated',
+    req,
+    metadata: { upiId: paymentDetails.upiId, payeeName: paymentDetails.payeeName, qrImage: paymentDetails.qrImage ? 'set' : 'none' },
+  });
+  res.json({ paymentDetails });
+});
+
+module.exports = { get, updateSection, updatePaymentDetails, addApiKey, updateApiKey, deleteApiKey, testEmail, testSms };

@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { makeAppendOnly } = require('../utils/immutable');
 const { COMMISSION_KINDS, COMMISSION_LEVELS, COMMISSION_STATUSES } = require('../constants/admin');
 
 const { Schema } = mongoose;
@@ -23,6 +24,11 @@ const commissionSchema = new Schema(
     turnover: { type: Number, default: 0 },
     /** Percent this account keeps, e.g. 0.5 = 0.5%. */
     rate: { type: Number, default: 0 },
+    /** The rate this account received from its upline, and the part it passed down (rate = received − given). */
+    receivedRate: { type: Number, default: null },
+    givenRate: { type: Number, default: null },
+    /** The ledger entry that credited this commission to the wallet. */
+    transaction: { type: Schema.Types.ObjectId, ref: 'Transaction', default: null },
     commission: { type: Number, default: 0 },
     status: { type: String, enum: COMMISSION_STATUSES, default: 'Pending', index: true },
     settledAt: { type: Date, default: null },
@@ -36,5 +42,8 @@ commissionSchema.index(
   { event: 1, player: 1, entity: 1, kind: 1 },
   { unique: true, partialFilterExpression: { event: { $type: 'objectId' } } },
 );
+
+// Paid commission is a financial record: never edited or deleted (see utils/immutable.js).
+makeAppendOnly(commissionSchema, 'Commission', { allow: ['transaction'] });
 
 module.exports = mongoose.model('Commission', commissionSchema);

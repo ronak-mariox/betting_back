@@ -82,8 +82,11 @@ const userSchema = new Schema(
     lastLoginAt: { type: Date, default: null },
     /** Bumped whenever the password changes, so tokens issued earlier stop verifying. */
     passwordChangedAt: { type: Date, default: null },
-    /** Panel notification/display toggles from Profile → Preferences, keyed by setting label. */
-    preferences: { type: Map, of: Boolean, default: {} },
+    /**
+     * Profile → Preferences, keyed by setting: notification switches (true / false)
+     * plus `language` ('en' | 'hi') and `theme` ('dark' | 'light').
+     */
+    preferences: { type: Map, of: Schema.Types.Mixed, default: {} },
     /** Live cash balance, in rupees. Moved only via wallet.service.js (requests, manual entries, transfers). */
     walletBalance: { type: Number, default: 0 },
 

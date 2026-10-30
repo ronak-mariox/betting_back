@@ -8,8 +8,8 @@ const { verifyAccessToken } = require('./services/token.service');
  * polls it once and pushes what changed to everyone listening:
  *
  *   rooms        who's in it                 events
- *   matches      every signed-in client      odds, matches:changed
- *   match:<id>   clients on that match       odds
+ *   matches      every signed-in client      odds, ball, matches:changed
+ *   match:<id>   clients on that match       odds, ball
  *   user:<id>    that account's devices      player:changed
  *   staff        panel (non-player) users    admin:changed, permissions:changed
  *   (everyone)   every connected client      config:changed
@@ -72,6 +72,12 @@ function emitOdds(eventId, markets) {
   io.to('matches').to(`match:${eventId}`).emit('odds', { eventId: String(eventId), markets });
 }
 
+/** A ball is being bowled (`running`) or has been: the score card shows a ball meanwhile. */
+function emitBall(eventId, running) {
+  if (!io) return;
+  io.to('matches').to(`match:${eventId}`).emit('ball', { eventId: String(eventId), running });
+}
+
 /** The match list itself changed (a match went live / finished, a market opened or closed): refetch it. */
 function emitMatchesChanged() {
   if (!io) return;
@@ -108,6 +114,7 @@ const connectedCount = () => (io ? io.engine.clientsCount : 0);
 module.exports = {
   init,
   emitOdds,
+  emitBall,
   emitMatchesChanged,
   emitPlayerChanged,
   emitStaffChanged,

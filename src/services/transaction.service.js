@@ -13,11 +13,15 @@ const TAB_TYPES = {
   commission: ['Commission', 'Referral Bonus'],
   payments: ['Payment'],
   adjustments: ['Adjustment'],
+  transfers: ['Adjustment'],
 };
 
 const listTransactions = async ({ tab, q, page = 1, limit = DEFAULT_PAGE_LIMIT, scope = null }) => {
   const filter = applyScope({}, scope);
   if (tab && TAB_TYPES[tab]) filter.type = { $in: TAB_TYPES[tab] };
+  // Wallet-to-wallet transfers are Adjustment rows with method "Fund Transfer".
+  if (tab === 'transfers') filter.method = 'Fund Transfer';
+  if (tab === 'adjustments') filter.method = { $ne: 'Fund Transfer' };
 
   if (q) {
     const regex = new RegExp(escapeRegex(q), 'i');
@@ -30,6 +34,8 @@ const listTransactions = async ({ tab, q, page = 1, limit = DEFAULT_PAGE_LIMIT, 
   const [items, total] = await Promise.all([
     Transaction.find(filter)
       .populate('user', 'name username')
+      .populate('counterparty', 'name username')
+      .populate('relatedEvent', 'name')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(Number(limit)),

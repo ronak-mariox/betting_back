@@ -1,6 +1,6 @@
 /** Shared enums for the super-admin panel's modules (wallet, betting, risk, commission, …). */
 const TRANSACTION_TYPES = ['Deposit', 'Withdrawal', 'Bet Win', 'Bet Loss', 'Adjustment', 'Commission', 'Payment', 'Referral Bonus'];
-const TRANSACTION_STATUSES = ['Pending', 'Completed', 'Failed'];
+const TRANSACTION_STATUSES = ['Pending', 'Completed', 'Failed', 'Cancelled'];
 
 const WALLET_REQUEST_KINDS = ['deposit', 'withdrawal'];
 const WALLET_REQUEST_STATUSES = ['Pending', 'Approved', 'Rejected'];

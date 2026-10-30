@@ -10,7 +10,7 @@ const env = require('../config/env');
  */
 
 const ID_TTL_MS = 10 * 60 * 1000;
-const CARD_TTL_MS = 1500;
+const CARD_TTL_MS = 800;
 // No score for a match is rechecked less often than a live one is refreshed.
 const MISSING_TTL_MS = 30 * 1000;
 const ids = new Map(); // gmid → { id, at }

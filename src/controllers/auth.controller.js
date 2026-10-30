@@ -192,6 +192,16 @@ const revokeSession = asyncHandler(async (req, res) => {
   res.status(204).send();
 });
 
+const revokeOtherSessions = asyncHandler(async (req, res) => {
+  const current = await RefreshToken.findOne({ user: req.user._id, tokenHash: tokenService.hashToken(req.body.refreshToken) }).select('_id');
+  const result = await RefreshToken.updateMany(
+    { user: req.user._id, revokedAt: null, ...(current ? { _id: { $ne: current._id } } : {}) },
+    { $set: { revokedAt: new Date() } },
+  );
+  await auditService.record({ actor: req.user, action: 'sessions_revoked_others', target: req.user._id, req, metadata: { count: result.modifiedCount } });
+  res.json({ revoked: result.modifiedCount });
+});
+
 const auditLogs = asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(100, Number(req.query.limit) || 25);
@@ -267,6 +277,7 @@ module.exports = {
   resetPassword,
   listSessions,
   revokeSession,
+  revokeOtherSessions,
   auditLogs,
   securityStats,
   allSessions,

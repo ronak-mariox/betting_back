@@ -30,17 +30,40 @@ async function downlinePlayers(actor) {
     .map((id) => new mongoose.Types.ObjectId(id));
 }
 
-async function listEvents() {
-  const events = await Event.find({ status: { $in: ['Live', 'Upcoming', 'Suspended'] } })
-    .sort({ status: 1, startTime: 1 })
-    .select('sport league name emoji status startTime provider')
+/**
+ * Matches with their markets (name, status, result and current rates):
+ * in-play (live, upcoming, suspended) or — with `finished` — completed ones.
+ */
+async function listEvents({ finished = false } = {}) {
+  const statuses = finished ? ['Completed', 'Settled'] : ['Live', 'Upcoming', 'Suspended'];
+  const events = await Event.find({ status: { $in: statuses } })
+    .sort(finished ? { updatedAt: -1 } : { status: 1, startTime: 1 })
+    .limit(finished ? 100 : 500)
+    .select('sport league name emoji status startTime provider commissionSettledAt updatedAt')
     .lean();
-  const counts = await Market.aggregate([
-    { $match: { event: { $in: events.map((e) => e._id) }, status: 'Active' } },
-    { $group: { _id: '$event', n: { $sum: 1 } } },
-  ]);
-  const open = new Map(counts.map((row) => [String(row._id), row.n]));
-  return events.map((e) => ({ ...e, openMarkets: open.get(String(e._id)) || 0 }));
+  const markets = await Market.find({ event: { $in: events.map((e) => e._id) } })
+    .select('event name type status winner settledAt bets runners')
+    .sort({ createdAt: 1 })
+    .lean();
+  const byEvent = new Map();
+  for (const m of markets) {
+    const key = String(m.event);
+    if (!byEvent.has(key)) byEvent.set(key, []);
+    byEvent.get(key).push({
+      _id: m._id,
+      name: m.name,
+      type: m.type,
+      status: m.status,
+      winner: m.winner || '',
+      settledAt: m.settledAt || null,
+      bets: m.bets || 0,
+      runners: (m.runners || []).map((r) => ({ name: r.name, odds: r.odds, active: r.active !== false, line: r.line ?? null, rate: r.rate ?? null })),
+    });
+  }
+  return events.map((e) => {
+    const own = byEvent.get(String(e._id)) || [];
+    return { ...e, openMarkets: own.filter((m) => m.status === 'Active').length, markets: own };
+  });
 }
 
 async function listMarkets({ eventId } = {}) {

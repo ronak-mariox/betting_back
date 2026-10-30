@@ -2,6 +2,7 @@ const AuditLog = require('../models/AuditLog');
 const RefreshToken = require('../models/RefreshToken');
 const networkService = require('./network.service');
 const Settings = require('../models/Settings');
+const walletService = require('./wallet.service');
 
 /**
  * The signed-in staff member's Profile page: real quick stats, recent
@@ -13,7 +14,7 @@ const Settings = require('../models/Settings');
  * the upline set one, otherwise the platform default from Settings (flagged,
  * so the page can say which it is).
  */
-function effectiveLimits(actor, settings, detail) {
+function effectiveLimits(actor, settings, detail, walletRules) {
   const own = (value) => Number(value) > 0;
   const platform = (value) => (Number(value) > 0 ? Number(value) : null);
   return {
@@ -31,7 +32,8 @@ function effectiveLimits(actor, settings, detail) {
     maxUserExposure: platform(settings?.exposureLimits?.maxUserExposure),
     /** Sum of the wallet balances of everyone below this account. */
     creditLimit: detail ? detail.summary.downlineBalance : null,
-    walletRules: settings?.walletRules || null,
+    /** The deposit / withdrawal limits players get (platform defaults until the admin saves Wallet Rules). */
+    walletRules,
   };
 }
 
@@ -70,7 +72,7 @@ async function getMyProfile(actor, currentSessionUserAgent = '') {
     currentUserAgent: currentSessionUserAgent,
     wallet: detail && { ...detail.wallet, transactions: detail.transactions },
     preferences: Object.fromEntries(actor.preferences || []),
-    limits: effectiveLimits(actor, settings, detail),
+    limits: effectiveLimits(actor, settings, detail, await walletService.walletRules()),
   };
 }
 

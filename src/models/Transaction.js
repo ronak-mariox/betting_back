@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
-const { TRANSACTION_TYPES, TRANSACTION_STATUSES } = require('../constants/admin');
+const { makeAppendOnly } = require('../utils/immutable');
+const { COMMISSION_KINDS, TRANSACTION_TYPES, TRANSACTION_STATUSES } = require('../constants/admin');
 
 const { Schema } = mongoose;
 
@@ -16,6 +17,15 @@ const transactionSchema = new Schema(
     relatedBet: { type: Schema.Types.ObjectId, ref: 'Bet', default: null },
     relatedPartner: { type: Schema.Types.ObjectId, ref: 'Partner', default: null },
     note: { type: String, trim: true, default: '' },
+    /** The other side of a transfer: who sent it (on a credit) or who received it (on a debit). */
+    counterparty: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+    /** The owner's wallet balance right after this entry, so the ledger can be reconciled row by row. */
+    balanceAfter: { type: Number, default: null },
+    /** Commission entries: Session or Match, and the match it was paid for. */
+    kind: { type: String, enum: [...COMMISSION_KINDS, null], default: null },
+    relatedEvent: { type: Schema.Types.ObjectId, ref: 'Event', default: null },
+    /** Adjustments: why the correction was made (required for manual entries). */
+    reason: { type: String, trim: true, default: '' },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
   },
   { timestamps: true },
@@ -34,5 +44,8 @@ function announce(doc) {
 transactionSchema.post('save', announce);
 transactionSchema.post('findOneAndUpdate', announce);
 transactionSchema.post('insertMany', (docs) => [].concat(docs).forEach(announce));
+
+// The ledger is append-only: corrections are new Adjustment entries, never edits.
+makeAppendOnly(transactionSchema, 'Ledger');
 
 module.exports = mongoose.model('Transaction', transactionSchema);

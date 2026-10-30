@@ -12,8 +12,8 @@ router.use(authenticate);
 
 const adminOnly = authorize('super-admin');
 const staff = authorize('super-admin', 'franchise', 'super-agent', 'agent');
-/** Players raise tickets from the app's Help screen; staff from the panel. */
-const ticketOwner = authorize('super-admin', 'franchise', 'super-agent', 'agent', 'player');
+/** Players raise tickets from the app's Help screen. Staff panels have no tickets (client requirement). */
+const ticketOwner = authorize('super-admin', 'player');
 /** The Permissions page governs staff only — a player always has its own tickets. */
 const staffGrant = (...args) => {
   const check = grant(...args);
